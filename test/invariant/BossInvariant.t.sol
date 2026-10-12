@@ -93,6 +93,14 @@ contract BossInvariantTest is BossFixture {
         }
     }
 
+    /// @dev The hook is a sink: BOSS sent to it never makes it a creditor or a winner.
+    function invariant_theHookHoldsNoCredit() public view {
+        assertEq(hook.unclaimedKill(address(hook)), 0, "no prize on the hook");
+        for (uint64 r = 1; r <= hook.round(); r++) {
+            assertEq(hook.damage(r, address(hook)), 0, "no damage on the hook");
+        }
+    }
+
     /// @dev Kill prizes accrue per winner across rounds, so the bound is per winner: what a wallet
     /// received through claimKill never exceeds the prizes of the rounds it killed.
     function invariant_killClaimsWithinPrizes() public view {

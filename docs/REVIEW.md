@@ -63,3 +63,38 @@ BOSS that left the pool with the blow.
 - Mainnet fork (`test/fork/UniversalRouter.t.sol`, `BOSS_FORK_RPC` set): 5 passed. Buy, sell, relayer-signed
   buy and sell, and the interface-fee shape of the Uniswap app (TAKE to the router, PAY_PORTION, SWEEP) with
   a kill: the prize and the damage reach the player, nothing stays on the Universal Router.
+
+## Second swarm audit (job be67d693, 2026-10-12)
+
+The swarm audit of `b154ad2` found 2 high, 5 low and 3 info. Fixed in code:
+
+- High 1, flash sells never forfeited pending credit: a sell now takes back this transaction's pending
+  credit for the BOSS it hands in (`_unpend`), and the net credit a transaction creates (credited minus
+  forfeited) never exceeds the HP it has removed in the round when that credit is delivered
+  (`_cappedPending`, anchored at the transaction's first trade of the round).
+- High 2, pending and killing credit merged across the parties of one transaction: they are scoped to the
+  locker (`afterSwap`'s `sender`); a swap here by another locker voids what is left and trims the cap.
+- Low 3: the hook is a sink like the pool (BOSS sent or taken to it forfeits or voids its credit).
+- Low 6: blow BOSS handed back to the pool lowers its holder's count, and the prize is re-decided over the
+  transaction's holders whenever the largest one hands some away (this also fixes a split such as
+  46% / 10% / 44% that was not in the report).
+- Documented in the README: lows 4, 5 and 7 (7 kept as the agreed rule) and infos 8 to 10.
+
+Two independent reviews followed, each with its own probes (`test/review3/`, `test/review4/`, run with BOSS
+as currency0, as currency1 and with native ETH):
+
+- Review 3 broke the first cap (it re-anchored when the pending batch emptied, so selling first and buying
+  back inflated a kill: 0.96 credited against 0.1 removed). Fixed by anchoring once per transaction and
+  round. Its finding B is a documented limit: BOSS a router leaves inside the PoolManager can be collected
+  by the next party that takes BOSS out in that transaction, which the hook cannot tell apart from the
+  router; standard routers take everything out.
+- Review 4 found that a forfeited sell was charged twice by the cap (one player selling and buying again
+  in one transaction lost the second buy's credit) and that, on heal-boost days, a later locker could be
+  credited with an earlier locker's voided damage. Both fixed: forfeits give back their cap room, and a
+  locker change trims the room to the HP left. It also corrected a README sentence.
+- `forge test`: 33 suites, 400 tests passed, 0 failed, 5 skipped (fork tests, need an RPC). Both reviews'
+  fuzzers pass 3,000 runs in each configuration; the invariant campaign passes at 256 runs × depth 64.
+- `forge build --sizes`: BossHook runtime 23,151 bytes (limit 24,576; margin 1,425).
+- Gas with an active ability, router included: buy 262,990, sell 245,444; transfer 45,975 / 51,618.
+- Mainnet fork (`test/fork/UniversalRouter.t.sol`, `BOSS_FORK_RPC` set): 5 passed with these fixes, the
+  interface-fee kill through the real Universal Router included.

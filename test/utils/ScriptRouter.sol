@@ -31,7 +31,9 @@ contract ScriptRouter is IUnlockCallback {
         ForwardShare,
         ForwardAllBut,
         SellOwn,
-        PullFrom
+        PullFrom,
+        BuyBossOut,
+        SellOwnShare
     }
 
     struct Action {
@@ -124,10 +126,27 @@ contract ScriptRouter is IUnlockCallback {
         return Action(Kind.PullFrom, payer, amount, uint256(uint160(to)), 0);
     }
 
+    /// @dev Exact-output buy of `bossOut` BOSS, paid by this contract.
+    function buyBossOut(uint256 bossOut) external pure returns (Action memory) {
+        return Action(Kind.BuyBossOut, address(0), bossOut, 0, 0);
+    }
+
+    /// @dev Exact-input sell of `num / den` of the BOSS this contract holds.
+    function sellOwnShare(uint256 num, uint256 den) external pure returns (Action memory) {
+        return Action(Kind.SellOwnShare, address(0), 0, num, den);
+    }
+
     // ------------------------------------------------------------------ running
 
     function run(Action[] calldata actions) external {
         manager.unlock(abi.encode(actions));
+    }
+
+    /// @dev Several unlocks in one transaction, one script each.
+    function runMany(Action[][] calldata scripts) external {
+        for (uint256 i = 0; i < scripts.length; i++) {
+            manager.unlock(abi.encode(scripts[i]));
+        }
     }
 
     /// @dev Two unlocks in one transaction with a claim in between (claims can't run inside an
@@ -175,6 +194,12 @@ contract ScriptRouter is IUnlockCallback {
                 manager.swap(key, SwapParams(bossIs0, -int256(a.amount), _limit(bossIs0)), "");
             } else if (a.kind == Kind.PullFrom) {
                 boss.transferFrom(a.who, address(uint160(a.num)), _cap(boss.balanceOf(a.who), a.amount));
+            } else if (a.kind == Kind.BuyBossOut) {
+                bool z = !bossIs0;
+                manager.swap(key, SwapParams(z, int256(a.amount), _limit(z)), "");
+            } else if (a.kind == Kind.SellOwnShare) {
+                uint256 amt = boss.balanceOf(address(this)) * a.num / a.den;
+                manager.swap(key, SwapParams(bossIs0, -int256(amt), _limit(bossIs0)), "");
             }
         }
         _settleUp(bossC);

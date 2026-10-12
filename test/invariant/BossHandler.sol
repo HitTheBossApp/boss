@@ -210,6 +210,16 @@ contract BossHandler is Test {
         transfers++;
     }
 
+    /// @dev BOSS sent to the hook is lost and its credit is forfeited, like BOSS handed back to the pool.
+    function sendToHook(uint256 who, uint256 pct) external {
+        address a = _actor(who);
+        uint256 bal = boss.balanceOf(a);
+        if (bal == 0) return;
+        vm.prank(a);
+        boss.transfer(address(hook), bal * bound(pct, 1, 100) / 100);
+        transfers++;
+    }
+
     // ------------------------------------------------------------------ swaps
 
     function buy(uint256 who, uint256 amount) external {
