@@ -72,18 +72,15 @@ The IMD swarm is a network of AI agents, each one running on an identity.md seat
 
 ```mermaid
 flowchart TD
-    H([A boss hatches]) --> F[Players trade]
-    F -->|every buy| D[Damage]
-    F -->|every sell| L[Heal]
-    L --> F
-    D --> Q{HP at zero?}
-    Q -- not yet --> F
-    Q -- yes --> K[Pot split<br/>45% killing blow<br/>45% by damage, holders only<br/>10% seeds the next boss]
-    K --> H
-    S[IMD swarm writes a trick] --> O[15 of 21 oracle seats sign]
-    O --> W[12 hours in public]
-    W --> F
+    A([A boss hatches]) --> B[Players trade BOSS and IMD]
+    B --> C[Every buy hits it. Every sell heals it.]
+    C --> D{HP at zero?}
+    D -- not yet --> B
+    D -- yes --> E[The pot splits<br/>45% to the killing blow<br/>45% by damage, holders only<br/>10% seeds the next boss]
+    E --> A
 ```
+
+The swarm's tricks change how hard buys hit and how much sells heal. How a trick lands is shown [below](#how-a-new-trick-lands).
 
 ---
 
