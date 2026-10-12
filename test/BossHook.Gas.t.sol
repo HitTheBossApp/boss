@@ -26,4 +26,28 @@ contract BossGasTest is BossFixture {
         assertLt(buyGas, 450_000, "CLAUS swaps cost ~724k; BOSS must stay below");
         assertLt(sellGas, 450_000);
     }
+
+    /// @dev A plain BOSS transfer now reports to the hook: this is what that costs, with nothing to
+    /// move (no credit this round) and with credit travelling to the receiver.
+    function test_gas_transfer_withAndWithoutCredit() public {
+        giveBoss(carol, 10 ether); // carol never bought: nothing to move
+        vm.prank(carol);
+        boss.transfer(bob, 1 ether); // warm bob
+
+        uint256 g = gasleft();
+        vm.prank(carol);
+        boss.transfer(bob, 1 ether);
+        uint256 plainGas = g - gasleft();
+
+        buyExactIn(alice, 0.1 ether); // alice holds credit
+        g = gasleft();
+        vm.prank(alice);
+        boss.transfer(bob, boss.balanceOf(alice) / 2);
+        uint256 creditGas = g - gasleft();
+
+        console2.log("transfer gas, nothing to move", plainGas);
+        console2.log("transfer gas, credit travels", creditGas);
+        assertLt(plainGas, 60_000);
+        assertLt(creditGas, 120_000);
+    }
 }

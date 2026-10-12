@@ -11,6 +11,7 @@ import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {BossFixture} from "./utils/BossFixture.sol";
 import {BossHook} from "../src/BossHook.sol";
+import {BossToken} from "../src/BossToken.sol";
 
 /// @notice The 2.5% fee is always charged in the paired currency, on all four swap shapes, and
 /// split 60/40 between the pot and the treasury.
@@ -33,7 +34,9 @@ abstract contract BossFeesBase is BossFixture {
         assertEq(bossDeltaOf(d), 1_000_000 ether);
         uint256 paid = uint256(-quoteDeltaOf(d));
         uint256 fee = hookQuoteClaims();
-        assertEq(fee, (paid - fee) * hook.FEE_PIPS() / (PIPS - hook.FEE_PIPS()), "2.5% of gross, on top of the pool input");
+        assertEq(
+            fee, (paid - fee) * hook.FEE_PIPS() / (PIPS - hook.FEE_PIPS()), "2.5% of gross, on top of the pool input"
+        );
         assertAccounting();
     }
 
@@ -91,10 +94,10 @@ abstract contract BossFeesBase is BossFixture {
     function test_initialize_wrongPairedCurrencyReverts() public {
         BossHook fresh = _freshHook();
         MockERC20 other = new MockERC20("Other", "OTH", 0);
-        bool bossFirst = address(boss) < address(other);
+        bool bossFirst = address(freshBoss) < address(other);
         PoolKeyAlias memory k = PoolKeyAlias({
-            currency0: Currency.wrap(bossFirst ? address(boss) : address(other)),
-            currency1: Currency.wrap(bossFirst ? address(other) : address(boss)),
+            currency0: Currency.wrap(bossFirst ? address(freshBoss) : address(other)),
+            currency1: Currency.wrap(bossFirst ? address(other) : address(freshBoss)),
             fee: LP_FEE,
             tickSpacing: TICK_SPACING,
             hooks: IHooks(address(fresh))
@@ -124,8 +127,7 @@ abstract contract BossFeesBase is BossFixture {
         int24 bad = launchTick() + 301;
         uint160 price = TickMath.getSqrtPriceAtTick(bad);
         _expectInitRevert(
-            address(fresh),
-            abi.encodeWithSelector(BossHook.WrongStartingPrice.selector, price, bad, launchTick())
+            address(fresh), abi.encodeWithSelector(BossHook.WrongStartingPrice.selector, price, bad, launchTick())
         );
         manager.initialize(k, price);
     }
@@ -137,9 +139,7 @@ abstract contract BossFeesBase is BossFixture {
     }
 
     function test_constructor_pairedEqualsTokenReverts() public {
-        bytes memory code = abi.encodePacked(
-            type(BossHook).creationCode, hookArgsWith(INITIAL_HP, address(boss))
-        );
+        bytes memory code = abi.encodePacked(type(BossHook).creationCode, hookArgsWith(INITIAL_HP, address(boss)));
         vm.expectRevert(BossHook.InvalidConfig.selector);
         this.rawCreate(code);
     }
@@ -178,14 +178,20 @@ abstract contract BossFeesBase is BossFixture {
         }
     }
 
+    /// @dev A token binds to one hook for good, so a fresh hook comes with a fresh BOSS token,
+    /// ordered against the paired currency like the fixture's.
+    BossToken internal freshBoss;
+
     function _freshHook() internal returns (BossHook) {
-        return deployHookWith(hookArgsWith(INITIAL_HP + 1, pairedAddr));
+        freshBoss = _deployBossOrdered(pairedAddr, bossIsCurrency0);
+        return deployHookWith(hookArgsFor(address(freshBoss), INITIAL_HP + 1, pairedAddr));
     }
 
     function _keyOn(BossHook h, uint24 fee, int24 spacing) internal view returns (PoolKeyAlias memory) {
+        Currency fresh = Currency.wrap(address(freshBoss));
         return PoolKeyAlias({
-            currency0: key.currency0,
-            currency1: key.currency1,
+            currency0: bossIsCurrency0 ? fresh : key.currency0,
+            currency1: bossIsCurrency0 ? key.currency1 : fresh,
             fee: fee,
             tickSpacing: spacing,
             hooks: IHooks(address(h))
@@ -206,7 +212,9 @@ abstract contract BossFeesBase is BossFixture {
     }
 
     function _otherKey() internal view returns (PoolKeyAlias memory k) {
-        k = PoolKeyAlias({currency0: key.currency0, currency1: key.currency1, fee: 10_000, tickSpacing: 200, hooks: key.hooks});
+        k = PoolKeyAlias({
+            currency0: key.currency0, currency1: key.currency1, fee: 10_000, tickSpacing: 200, hooks: key.hooks
+        });
     }
 }
 

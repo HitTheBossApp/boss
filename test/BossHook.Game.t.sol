@@ -18,11 +18,11 @@ abstract contract BossGameBase is BossFixture {
     }
 
     function test_sellHealsBossAndForfeits() public {
-        buyExactIn(alice, 0.5 ether);
+        uint256 got = uint256(bossDeltaOf(buyExactIn(alice, 0.5 ether)));
         uint256 before = hook.hp();
-        sellExactIn(alice, 100_000 ether); // alice holds ~194k BOSS from the buy
+        sellExactIn(alice, got); // everything alice bought this round
         assertGt(hook.hp(), before, "healed");
-        assertTrue(hook.sold(1, alice));
+        assertEq(hook.damage(1, alice), 0, "selling all she bought forfeits all her damage");
         assertEq(hook.eligibleDamage(1), 0, "alice's damage no longer eligible");
         assertAccounting();
     }
@@ -89,28 +89,31 @@ abstract contract BossGameBase is BossFixture {
         assertAccounting();
     }
 
-    function test_noEligibleDamage_rollsIntoSeed() public {
-        buyExactIn(alice, 0.5 ether);
-        sellExactIn(alice, 1_000 ether); // alice forfeits
+    /// @dev The killing blow is itself fresh damage, so a kill always leaves eligible damage and the
+    /// "nobody eligible" branch of BossMath.splitPot (tested in BossMath.t.sol) is not reachable.
+    function test_sellerWhoKills_takesKillerHalfAndTheKillHitCounts() public {
+        uint256 got = uint256(bossDeltaOf(buyExactIn(alice, 0.5 ether)));
+        sellExactIn(alice, got); // alice sells all she bought: she forfeits all her damage
         uint256 hpNow = hook.hp();
-        // alice (already sold) lands the killing blow: she still gets the killer half
-        buyExactIn(alice, hpNow + 0.01 ether);
+        buyExactIn(alice, hpNow + 0.01 ether); // her killing blow is fresh damage
         (,, uint256 kp, uint256 dp, uint256 elig) = hook.results(1);
-        assertEq(elig, 0);
-        assertEq(dp, 0, "nobody eligible: damage half goes to the seed");
-        assertEq(hook.unclaimedKill(alice), kp);
+        assertEq(elig, hook.damage(1, alice), "only the killing hit is eligible");
+        assertEq(hook.unclaimedKill(alice), kp, "she still gets the killer half");
+        assertEq(hook.claimableDamage(1, alice), dp, "and the whole damage pool");
         assertAccounting();
     }
 
-    // ---- Review Focus 2: sell then buy again in the same round
-    function test_soldWallet_newDamageNotEligible() public {
+    // ---- Review Focus 2: sell then buy again in the same round (forfeits are proportional now)
+    function test_sellerWhoBuysAgain_claimsOnlyTheNewDamage() public {
+        uint256 got = uint256(bossDeltaOf(buyExactIn(alice, 0.2 ether)));
+        sellExactIn(alice, got);
         buyExactIn(alice, 0.2 ether);
-        sellExactIn(alice, 1_000 ether);
-        buyExactIn(alice, 0.2 ether);
-        assertEq(hook.eligibleDamage(1), 0, "new damage from a seller is never eligible");
+        assertEq(hook.eligibleDamage(1), 0.2 ether, "the new hit counts, the sold one does not");
         buyExactIn(bob, 2 ether); // bob kills
-        vm.expectRevert(BossHook.SoldThisRound.selector);
+        (,,, uint256 dp, uint256 elig) = hook.results(1);
+        uint256 before = _quoteBalance(alice);
         hook.claimDamage(1, alice);
+        assertEq(_quoteBalance(alice) - before, dp * 0.2 ether / elig, "paid for the new damage only");
         assertAccounting();
     }
 
@@ -151,18 +154,17 @@ abstract contract BossGameBase is BossFixture {
         buyExactIn(alice, 1 ether);
         buyExactIn(alice, 0.3 ether);
         assertEq(hook.damage(2, alice), 0.3 ether);
-        assertFalse(hook.sold(2, alice));
+        assertEq(hook.eligibleDamage(2), 0.3 ether);
     }
 
-    // ---- Controller ruling: sells are attributed to tx.origin, never to hookData
-    function test_sellNamingSomeoneElse_forfeitsSignerNotNamed() public {
+    // ---- Every trade is credited to its signer (tx.origin); hookData never names anyone
+    function test_sellNamingSomeoneElse_onlyTouchesTheSigner() public {
         buyExactIn(alice, 0.2 ether);
-        buyExactIn(bob, 0.2 ether);
-        giveBoss(carol, 1_000_000 ether);
-        _swap(carol, SwapParams(bossIsCurrency0, -int256(1_000 ether), _limit(bossIsCurrency0)), abi.encode(alice), 0);
-        assertFalse(hook.sold(1, alice), "named wallet untouched");
-        assertTrue(hook.sold(1, carol), "signer forfeits");
-        assertEq(hook.eligibleDamage(1), 0.4 ether);
+        uint256 got = uint256(bossDeltaOf(buyExactIn(carol, 0.2 ether)));
+        _swap(carol, SwapParams(bossIsCurrency0, -int256(got), _limit(bossIsCurrency0)), abi.encode(alice), 0);
+        assertEq(hook.damage(1, alice), 0.2 ether, "named wallet untouched");
+        assertEq(hook.damage(1, carol), 0, "the signer sold all she bought and forfeits all");
+        assertEq(hook.eligibleDamage(1), 0.2 ether);
         assertAccounting();
     }
 
@@ -172,23 +174,21 @@ abstract contract BossGameBase is BossFixture {
         _swap(actor, SwapParams(z, -int256(0.1 ether), _limit(z)), hookData, 0);
     }
 
-    function test_identity_packed20BytesCreditsThatAddress() public {
+    function test_identity_packed20BytesAreIgnored() public {
         _buyWith(carol, abi.encodePacked(bob));
-        assertEq(hook.damage(1, bob), 0.1 ether, "20 packed bytes name the buyer");
-        assertEq(hook.damage(1, carol), 0);
-    }
-
-    function test_identity_dirtyUpperBitsFallBackToOrigin() public {
-        bytes memory dirty = abi.encode(uint256(uint160(bob)) | (uint256(1) << 200));
-        _buyWith(carol, dirty);
-        assertEq(hook.damage(1, bob), 0, "a word with dirty upper bits is not an address");
-        // PoolSwapTest has no msgSender(), so the next fallback is tx.origin.
+        assertEq(hook.damage(1, bob), 0, "hookData never names the buyer");
         assertEq(hook.damage(1, carol), 0.1 ether, "credited to the signer");
     }
 
-    function test_identity_emptyHookDataFallsBackToOrigin() public {
+    function test_identity_encodedAddressIsIgnored() public {
+        _buyWith(carol, abi.encode(bob));
+        assertEq(hook.damage(1, bob), 0, "hookData never names the buyer");
+        assertEq(hook.damage(1, carol), 0.1 ether, "credited to the signer");
+    }
+
+    function test_identity_emptyHookDataCreditsTheSigner() public {
         _buyWith(carol, "");
-        assertEq(hook.damage(1, carol), 0.1 ether, "PoolSwapTest has no msgSender(): tx.origin");
+        assertEq(hook.damage(1, carol), 0.1 ether, "credited to the signer");
     }
 }
 

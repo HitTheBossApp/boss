@@ -92,7 +92,9 @@ abstract contract BossFixture is Test {
 
         (Currency c0, Currency c1) =
             bossIsCurrency0 ? (Currency.wrap(address(boss)), quote) : (quote, Currency.wrap(address(boss)));
-        key = PoolKey({currency0: c0, currency1: c1, fee: LP_FEE, tickSpacing: TICK_SPACING, hooks: IHooks(address(hook))});
+        key = PoolKey({
+            currency0: c0, currency1: c1, fee: LP_FEE, tickSpacing: TICK_SPACING, hooks: IHooks(address(hook))
+        });
 
         swapRouter = new PoolSwapTest(manager);
         lpRouter = new PoolModifyLiquidityTest(manager);
@@ -115,9 +117,13 @@ abstract contract BossFixture is Test {
     /// @dev Constructor args (9 flat words) with hp and paired currency overridable (a different `hp` gives a different
     /// init code, so a second hook can be mined next to the fixture's).
     function hookArgsWith(uint256 hp, address paired) internal view returns (bytes memory) {
+        return hookArgsFor(address(boss), hp, paired);
+    }
+
+    function hookArgsFor(address token, uint256 hp, address paired) internal view returns (bytes memory) {
         return abi.encode(
             IPoolManager(address(manager)),
-            address(boss),
+            token,
             keeper,
             IAbilityBoard(address(board)),
             oracleSigner,
@@ -144,11 +150,15 @@ abstract contract BossFixture is Test {
         assertEq(address(deployed), predicted, "hook address");
     }
 
+    /// @dev Salts already used by earlier BOSS deployments in this test, so a second token lands elsewhere.
+    uint256 internal nextBossSalt;
+
     function _deployBossOrdered(address other, bool before) internal returns (BossToken token) {
         bytes32 initHash = keccak256(type(BossToken).creationCode);
-        for (uint256 i = 0; i < 1_000; i++) {
+        for (uint256 i = nextBossSalt; i < nextBossSalt + 1_000; i++) {
             address predicted = HookFlags.computeAddress(address(this), bytes32(i), initHash);
             if ((predicted < other) == before) {
+                nextBossSalt = i + 1;
                 token = new BossToken{salt: bytes32(i)}();
                 return token;
             }
@@ -222,7 +232,10 @@ abstract contract BossFixture is Test {
     function buyExactOut(address actor, uint256 bossAmount, uint256 maxQuote) internal returns (BalanceDelta) {
         bool zeroForOne = !bossIsCurrency0;
         return _swap(
-            actor, SwapParams(zeroForOne, int256(bossAmount), _limit(zeroForOne)), abi.encode(actor), useNative() ? maxQuote : 0
+            actor,
+            SwapParams(zeroForOne, int256(bossAmount), _limit(zeroForOne)),
+            abi.encode(actor),
+            useNative() ? maxQuote : 0
         );
     }
 
@@ -264,7 +277,11 @@ abstract contract BossFixture is Test {
     }
 
     function assertAccounting() internal view {
-        assertEq(hookQuoteClaims(), hook.pot() + hook.treasuryOwed() + hook.totalReserved(), "claims != pot+treasury+reserved");
+        assertEq(
+            hookQuoteClaims(),
+            hook.pot() + hook.treasuryOwed() + hook.totalReserved(),
+            "claims != pot+treasury+reserved"
+        );
         assertEq(hookBossClaims(), 0, "hook must never hold BOSS");
         assertEq(address(hook).balance, 0, "hook must hold no raw ETH");
         if (!useNative()) assertEq(quoteToken.balanceOf(address(hook)), 0, "hook must hold no raw quote token");

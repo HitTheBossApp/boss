@@ -14,6 +14,9 @@ cbor_metadata = false
 ffi = false
 fs_permissions = []
 gas_limit = "300000000"
+# Every top-level call in a test is its own transaction, so transient storage (the hook's pending
+# credit) is cleared between them, as on chain.
+isolate = true
 
 [profile.default.fuzz]
 runs = 256

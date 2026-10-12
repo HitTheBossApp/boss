@@ -18,16 +18,16 @@ import {ModifyLiquidityParams, SwapParams} from "v4-core/src/types/PoolOperation
 import {OracleGate} from "./OracleGate.sol";
 import {BossMath} from "./libraries/BossMath.sol";
 import {IAbility, IAbilityBoard, SwapInfo} from "./interfaces/IAbility.sol";
-
-interface IMsgSender {
-    function msgSender() external view returns (address);
-}
+import {IBossToken} from "./interfaces/IBossToken.sol";
 
 /// @title BossHook — the boss that learns
 /// @notice Every buy of BOSS hits the boss, every sell heals it. A 2.5% fee in the paired currency
 /// fills the pot (1.5%) and the treasury that pays the IMD swarm (1%). When the boss falls, the
 /// killing blow takes half of the pot (after a 10% seed for the next boss) and the rest is split
-/// by damage among wallets that did not sell during the fight. Each day the swarm writes an
+/// by the damage each wallet still holds. Credit follows the BOSS, not the signer: a buy is credited
+/// to the wallet that receives the BOSS from the pool, BOSS handed back to the pool forfeits damage
+/// in proportion to the BOSS bought that round, and BOSS sent to another wallet takes that share of
+/// the credit with it (the token reports every transfer to this hook). Each day the swarm writes an
 /// ability that changes how much a trade hits or heals; it only returns numbers, is called with
 /// STATICCALL under a gas cap, and is clamped to [0.25x, 4x].
 ///
@@ -63,7 +63,6 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     uint256 public constant TREASURY_SHARE_BPS = 4_000;
     int24 public constant LAUNCH_TICK_TOLERANCE = 300;
     uint8 public constant PAIRED_DECIMALS = 18;
-    uint256 public constant MSG_SENDER_PROBE_GAS = 50_000;
 
     // ---------------------------------------------------------------- immutables
 
@@ -116,8 +115,14 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         uint256 eligibleDamage;
     }
 
-    mapping(uint64 round => mapping(address trader => uint256)) public damage;
-    mapping(uint64 round => mapping(address trader => bool)) public sold;
+    /// @notice Damage a wallet still holds in a round: credited with the BOSS it received from the
+    /// pool, minus what left with the BOSS it handed back to the pool or sent to another wallet.
+    mapping(uint64 round => mapping(address wallet => uint256)) public damage;
+    /// @notice BOSS a wallet received from the pool this round (or, with its credit, from another
+    /// wallet) and still holds. `x` BOSS leaving the wallet takes damage * x / bought with it (all
+    /// of it once x >= bought) and lowers this by x.
+    mapping(uint64 round => mapping(address wallet => uint256)) public bought;
+    /// @notice Sum of `damage` over all wallets in a round: the denominator of the damage pool.
     mapping(uint64 round => uint256) public eligibleDamage;
     mapping(uint64 round => RoundResult) public results;
     mapping(address winner => uint256) public unclaimedKill;
@@ -143,6 +148,20 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     uint256 internal _payoutAmount;
     uint256 internal _entered = 1;
 
+    // ---------------------------------------------------------------- transient scratch (cleared after every transaction)
+
+    /// @dev Damage and BOSS of this transaction's buys that no wallet has received yet, and their round.
+    bytes32 internal constant T_PEND_ROUND = bytes32(uint256(1));
+    bytes32 internal constant T_PEND_DAMAGE = bytes32(uint256(2));
+    bytes32 internal constant T_PEND_BOSS = bytes32(uint256(3));
+    /// @dev The round this transaction closed, and how much of its killing credit (held by the signer
+    /// since the kill) still has BOSS to leave the pool and carry it. HELD: base of a per-wallet
+    /// map of how much of that BOSS each wallet holds so far; the killer prize follows the largest.
+    bytes32 internal constant T_KILL_ROUND = bytes32(uint256(4));
+    bytes32 internal constant T_KILL_DAMAGE = bytes32(uint256(5));
+    bytes32 internal constant T_KILL_BOSS = bytes32(uint256(6));
+    bytes32 internal constant T_KILL_HELD = bytes32(uint256(7));
+
     // ---------------------------------------------------------------- events
 
     event Launched(PoolId indexed poolId, address bossToken, Currency quote, uint64 launchTime, uint256 hp);
@@ -152,16 +171,26 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     event Healed(uint64 indexed round, address indexed trader, uint256 gross, uint256 heal, uint256 hpAfter);
     event Forfeited(uint64 indexed round, address indexed trader, uint256 damageLost);
     event BossKilled(
-        uint64 indexed round, address indexed killer, uint256 killerPrize, uint256 damagePool, uint256 seed, uint256 nextHp
+        uint64 indexed round,
+        address indexed killer,
+        uint256 killerPrize,
+        uint256 damagePool,
+        uint256 seed,
+        uint256 nextHp
     );
     event KillPaid(address indexed winner, uint256 amount);
     event AbilityFailed(address indexed ability);
     event AbilityQueued(uint256 indexed id, address indexed ability, uint64 activatesAt, bytes32 requestId);
     event AbilityActivated(address indexed ability);
     event DamagePaid(uint64 indexed round, address indexed trader, uint256 amount);
+    event Credited(uint64 indexed round, address indexed to, uint256 damage, uint256 boss);
+    event DamageMoved(uint64 indexed round, address indexed from, address indexed to, uint256 damage, uint256 boss);
+    event KillerCredited(uint64 indexed round, address indexed winner);
 
     // ---------------------------------------------------------------- errors
 
+    error NotBossToken();
+    error TokenNotBound();
     error InsufficientGasForAbility();
     error NotPoolManager();
     error HookNotImplemented();
@@ -183,7 +212,6 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     error ManagerUnlocked();
     error Reentrancy();
     error RoundNotOver();
-    error SoldThisRound();
     error AlreadyClaimed();
     error NothingPending();
     error StaleAttestation();
@@ -223,7 +251,9 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         uint24 launchTickAbs_,
         address pairedCurrency_
     ) OracleGate(oracleSigner_, questionHash_, PANEL_SIZE, QUORUM) {
-        if (address(manager) == address(0) || token == address(0) || keeper_ == address(0)) revert ZeroAddress();
+        if (address(manager) == address(0) || token == address(0) || keeper_ == address(0)) {
+            revert ZeroAddress();
+        }
         if (token.code.length == 0) revert TokenHasNoCode();
         if (address(board_).code.length == 0 || board_.keeper() != keeper_) revert InvalidConfig();
         if (initialHp_ < 4 || initialHp_ > type(uint128).max || launchTickAbs_ == 0 || launchTickAbs_ > 887_000) {
@@ -238,6 +268,10 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         initialHp = initialHp_;
         launchTickAbs = launchTickAbs_;
         Hooks.validateHookPermissions(IHooks(address(this)), getHookPermissions());
+        // From here on the token reports every transfer to this hook. The token refuses a second
+        // binding and any signer but its deployer's, so a bad launch fails here, loudly.
+        IBossToken(token).bindHook();
+        if (IBossToken(token).hook() != address(this)) revert TokenNotBound();
     }
 
     function getHookPermissions() public pure returns (Hooks.Permissions memory) {
@@ -329,22 +363,25 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(fee.toInt128(), 0), 0);
     }
 
-    function afterSwap(
-        address sender,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        BalanceDelta delta,
-        bytes calldata hookData
-    ) external onlyPoolManager returns (bytes4, int128) {
+    /// @dev The signer (tx.origin) only labels the events and the ability's read-only SwapInfo. Who
+    /// is credited is decided when the BOSS actually moves, in `onBossTransfer`: neither hookData,
+    /// nor the router, nor the signer can name the wallet that collects. Identity is never used
+    /// for authorization.
+    function afterSwap(address, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
+        external
+        onlyPoolManager
+        returns (bytes4, int128)
+    {
         _checkPool(key);
         (bool isBuy, bool exactInput) = _classify(params);
-        // Sells are always attributed to the signer: naming someone else must never forfeit their share.
-        address trader = isBuy ? _resolveTrader(sender, hookData) : tx.origin;
+        address signer = tx.origin;
         (uint256 fee, uint256 gross, int128 unspecifiedReturn) = _feeAndGross(params, delta, isBuy, exactInput);
         if (fee > 0) poolManager.mint(address(this), quote.toId(), fee);
-        emit FeeCharged(trader, isBuy, gross, fee);
+        emit FeeCharged(signer, isBuy, gross, fee);
         _accrue(fee);
-        _play(trader, isBuy, gross);
+        // BOSS that changed hands: received on a buy, paid in on a sell. The hook never charges BOSS.
+        int128 bossDelta = bossIsCurrency0 ? delta.amount0() : delta.amount1();
+        _play(signer, isBuy, gross, _abs(bossDelta));
         return (IHooks.afterSwap.selector, unspecifiedReturn);
     }
 
@@ -437,10 +474,13 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         }
     }
 
-    /// @dev The boss game step, run after this trade's fee is already in the pot.
-    function _play(address trader, bool isBuy, uint256 gross) internal {
+    /// @dev The boss game step, run after this trade's fee is already in the pot. `bossAmount` is the
+    /// BOSS the trade moved (received on a buy, paid in on a sell). A buy's damage waits as pending
+    /// credit until the BOSS leaves the pool (`onBossTransfer`); a sell only heals, the forfeit is
+    /// charged when BOSS enters the pool.
+    function _play(address signer, bool isBuy, uint256 gross, uint256 bossAmount) internal {
         _syncAbility();
-        (uint256 buyMult, uint256 sellMult) = _abilityMults(trader, isBuy, gross);
+        (uint256 buyMult, uint256 sellMult) = _abilityMults(signer, isBuy, gross);
         uint64 r = round;
         if (isBuy) {
             uint256 dmg = BossMath.scale(gross, buyMult);
@@ -448,31 +488,47 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
             uint256 current = hp;
             if (dmg > current) dmg = current;
             hp = current - dmg;
-            damage[r][trader] += dmg;
-            if (!sold[r][trader]) eligibleDamage[r] += dmg;
-            emit Hit(r, trader, gross, dmg, current - dmg);
-            if (current == dmg) _kill(trader);
+            _pend(r, dmg, bossAmount);
+            emit Hit(r, signer, gross, dmg, current - dmg);
+            if (current == dmg) _kill(signer);
         } else {
-            if (!sold[r][trader]) {
-                sold[r][trader] = true;
-                uint256 lost = damage[r][trader];
-                if (lost > 0) {
-                    eligibleDamage[r] -= lost;
-                    emit Forfeited(r, trader, lost);
-                }
-            }
             uint256 heal = BossMath.scale(gross, sellMult);
             uint256 room = maxHp - hp;
             if (heal > room) heal = room;
             hp += heal;
-            emit Healed(r, trader, gross, heal, hp);
+            emit Healed(r, signer, gross, heal, hp);
+        }
+    }
+
+    /// @dev Parks a buy's damage and BOSS for the wallet that receives the BOSS in this transaction.
+    function _pend(uint64 r, uint256 dmg, uint256 bossAmount) internal {
+        if (uint64(_tload(T_PEND_ROUND)) == r) {
+            _tstore(T_PEND_DAMAGE, _tload(T_PEND_DAMAGE) + dmg);
+            _tstore(T_PEND_BOSS, _tload(T_PEND_BOSS) + bossAmount);
+        } else {
+            // Older pending credit belongs to a round this transaction closed (it was credited at
+            // the kill) or to a buy that yielded no BOSS: void either way.
+            _tstore(T_PEND_ROUND, r);
+            _tstore(T_PEND_DAMAGE, dmg);
+            _tstore(T_PEND_BOSS, bossAmount);
         }
     }
 
     /// @dev Closes the round: seed stays in the pot, killer prize and damage pool are reserved
-    /// for pull claims, and the next boss spawns with HP set by how fast this one fell.
+    /// for pull claims, and the next boss spawns with HP set by how fast this one fell. The
+    /// transaction's pending credit (the killing blow included) is credited to the signer right
+    /// now, so the round closes with it counted; it moves, killer prize included, to whoever
+    /// receives that BOSS from the pool later in this transaction (`_arrive`).
     function _kill(address killer) internal {
         uint64 r = round;
+        uint256 pd = _tload(T_PEND_DAMAGE);
+        uint256 pb = _tload(T_PEND_BOSS);
+        _tstore(T_PEND_DAMAGE, 0);
+        _tstore(T_PEND_BOSS, 0);
+        _credit(r, killer, pd, pb);
+        _tstore(T_KILL_ROUND, r);
+        _tstore(T_KILL_DAMAGE, pd);
+        _tstore(T_KILL_BOSS, pb);
         uint256 elig = eligibleDamage[r];
         (uint256 seed, uint256 killerPrize, uint256 damagePool) = BossMath.splitPot(pot, elig > 0);
         results[r] = RoundResult({
@@ -506,8 +562,7 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
 
         bytes memory data = abi.encodeCall(
             IAbility.modifiers,
-            (
-                SwapInfo({
+            (SwapInfo({
                     trader: trader,
                     isBuy: isBuy,
                     amount: gross,
@@ -516,8 +571,7 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
                     hp: hp,
                     maxHp: maxHp,
                     pot: pot
-                })
-            )
+                }))
         );
         uint256 gasForAbility = ABILITY_GAS;
         bool ok;
@@ -537,6 +591,185 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         return (BossMath.clampMult(b), BossMath.clampMult(s));
     }
 
+    // ---------------------------------------------------------------- transfers reported by the token
+
+    /// @notice Called by BossToken after every transfer. BOSS leaving the pool carries this
+    /// transaction's pending credit (and the killing blow, if the round just closed) to the wallet
+    /// that receives it. BOSS leaving a wallet takes that wallet's credit with it, in proportion to
+    /// the BOSS it bought this round: forfeited when the BOSS goes into the pool, moved when it
+    /// goes to another wallet. Bookkeeping only: no external calls, and no revert path beyond the
+    /// caller check, so it can never block a transfer.
+    function onBossTransfer(address from, address to, uint256 value) external {
+        if (msg.sender != bossToken) revert NotBossToken();
+        if (value == 0 || from == to) return;
+        address pm = address(poolManager);
+        if (from == pm) {
+            _arrive(to, value);
+            return;
+        }
+        // The open round first: its BOSS count is exact (it follows every transfer), so what is
+        // left of the transfer after it is BOSS from earlier rounds.
+        uint64 r = round;
+        (uint256 dmg, uint256 bossAmount) = _release(r, from, value);
+        if (bossAmount != 0) {
+            if (to == pm) {
+                if (dmg != 0) {
+                    eligibleDamage[r] -= dmg;
+                    emit Forfeited(r, from, dmg);
+                }
+            } else {
+                damage[r][to] += dmg;
+                bought[r][to] += bossAmount;
+                emit DamageMoved(r, from, to, dmg, bossAmount);
+            }
+            value -= bossAmount;
+        }
+        // A round this transaction closed: its credit still travels on later hops (a router that
+        // custodies the killing blow's BOSS and then delivers it). A closed round is never
+        // forfeited, so BOSS going into the pool skips this.
+        if (value == 0 || to == pm) return;
+        uint64 kr = uint64(_tload(T_KILL_ROUND));
+        if (kr == 0) return;
+        if (!damageClaimed[kr][from]) {
+            (uint256 kd, uint256 kb) = _releaseClosed(kr, from, value);
+            if (kb != 0) {
+                damage[kr][to] += kd;
+                bought[kr][to] += kb;
+                emit DamageMoved(kr, from, to, kd, kb);
+            }
+        }
+        // The prize only follows BOSS that left the pool with the killing blow, whatever other
+        // BOSS of that round the transfer carries.
+        _trackKill(kr, from, to, value);
+    }
+
+    /// @dev BOSS left the pool for `to`: first the killing credit of a round this transaction closed
+    /// (held by the signer since the kill), then the pending credit of the open round.
+    function _arrive(address to, uint256 value) internal {
+        uint256 kb = _tload(T_KILL_BOSS);
+        if (kb != 0) {
+            uint64 kr = uint64(_tload(T_KILL_ROUND));
+            uint256 kd = _tload(T_KILL_DAMAGE);
+            (uint256 dmg, uint256 bossAmount) = _slice(kd, kb, value);
+            _tstore(T_KILL_DAMAGE, kd - dmg);
+            _tstore(T_KILL_BOSS, kb - bossAmount);
+            address signer = tx.origin;
+            // Credit the signer already collected stays collected: it is not paid twice.
+            if (to != signer && !damageClaimed[kr][signer]) {
+                damage[kr][signer] -= dmg;
+                bought[kr][signer] -= bossAmount;
+                damage[kr][to] += dmg;
+                bought[kr][to] += bossAmount;
+                emit DamageMoved(kr, signer, to, dmg, bossAmount);
+            }
+            _trackKill(kr, address(0), to, bossAmount);
+            value -= bossAmount;
+            if (value == 0) return;
+        }
+        uint256 pb = _tload(T_PEND_BOSS);
+        if (pb == 0) return;
+        uint256 pd = _tload(T_PEND_DAMAGE);
+        (uint256 dmg2, uint256 boss2) = _slice(pd, pb, value);
+        _tstore(T_PEND_DAMAGE, pd - dmg2);
+        _tstore(T_PEND_BOSS, pb - boss2);
+        _credit(uint64(_tload(T_PEND_ROUND)), to, dmg2, boss2);
+    }
+
+    /// @dev Tracks how much of the killing blow's BOSS each wallet holds so far in this transaction
+    /// (`from` is zero when the BOSS comes out of the pool; on a hop only what `from` holds of it
+    /// counts) and hands the killer prize to whoever holds the most: a router that custodies and
+    /// delivers, an interface fee of a fraction of a percent, a solver keeping a wei or another
+    /// player's transfer bundled after the kill never end up with it.
+    function _trackKill(uint64 kr, address from, address to, uint256 amount) internal {
+        if (to == address(this)) return;
+        if (from != address(0)) {
+            bytes32 fs = _heldSlot(kr, from);
+            uint256 hf = _tload(fs);
+            if (amount > hf) amount = hf;
+            if (amount == 0) return;
+            _tstore(fs, hf - amount);
+        }
+        bytes32 ts = _heldSlot(kr, to);
+        uint256 ht = _tload(ts) + amount;
+        _tstore(ts, ht);
+        address k = results[kr].killer;
+        if (to != k && ht > _tload(_heldSlot(kr, k))) _moveKill(kr, k, to);
+    }
+
+    function _heldSlot(uint64 kr, address who) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(T_KILL_HELD, kr, who));
+    }
+
+    /// @dev The killer prize moves with the killing blow's BOSS, unless it was already claimed.
+    function _moveKill(uint64 r, address from, address to) internal {
+        RoundResult storage res = results[r];
+        uint256 prize = res.killerPrize;
+        if (res.killer != from || unclaimedKill[from] < prize) return;
+        unclaimedKill[from] -= prize;
+        unclaimedKill[to] += prize;
+        res.killer = to;
+        emit KillerCredited(r, to);
+    }
+
+    /// @dev `value` BOSS out of `bossTotal` carries the same share of `dmgTotal`; all of it once
+    /// `value` covers the total.
+    function _slice(uint256 dmgTotal, uint256 bossTotal, uint256 value)
+        internal
+        pure
+        returns (uint256 dmg, uint256 bossAmount)
+    {
+        if (value >= bossTotal) return (dmgTotal, bossTotal);
+        return (dmgTotal * value / bossTotal, value);
+    }
+
+    /// @dev Takes `value` BOSS worth of round `r` credit away from `from`, in proportion to the BOSS
+    /// it bought. A wallet with no buy this round has nothing to give up.
+    function _release(uint64 r, address from, uint256 value) internal returns (uint256 dmg, uint256 bossAmount) {
+        uint256 owned = bought[r][from];
+        if (owned == 0) return (0, 0);
+        (dmg, bossAmount) = _slice(damage[r][from], owned, value);
+        bought[r][from] = owned - bossAmount;
+        damage[r][from] -= dmg;
+    }
+
+    /// @dev `_release` for the round this transaction closed. The signer holds the killing credit
+    /// of BOSS that has not left the pool yet; that part cannot travel on her own transfers until
+    /// it arrives, only what she really holds does.
+    function _releaseClosed(uint64 kr, address from, uint256 value) internal returns (uint256 dmg, uint256 bossAmount) {
+        uint256 owned = bought[kr][from];
+        uint256 had = damage[kr][from];
+        if (from == tx.origin) {
+            uint256 kb = _tload(T_KILL_BOSS);
+            uint256 kd = _tload(T_KILL_DAMAGE);
+            owned = owned > kb ? owned - kb : 0;
+            had = had > kd ? had - kd : 0;
+        }
+        if (owned == 0) return (0, 0);
+        (dmg, bossAmount) = _slice(had, owned, value);
+        bought[kr][from] -= bossAmount;
+        damage[kr][from] -= dmg;
+    }
+
+    function _credit(uint64 r, address to, uint256 dmg, uint256 bossAmount) internal {
+        if (dmg == 0 && bossAmount == 0) return;
+        damage[r][to] += dmg;
+        bought[r][to] += bossAmount;
+        eligibleDamage[r] += dmg;
+        emit Credited(r, to, dmg, bossAmount);
+    }
+
+    function _tload(bytes32 slot) internal view returns (uint256 v) {
+        assembly ("memory-safe") {
+            v := tload(slot)
+        }
+    }
+
+    function _tstore(bytes32 slot, uint256 v) internal {
+        assembly ("memory-safe") {
+            tstore(slot, v)
+        }
+    }
+
     // ---------------------------------------------------------------- claims
 
     /// @notice Pays a killing-blow prize. Anyone may trigger it; the money only goes to `winner`.
@@ -552,7 +785,6 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     /// @notice Pays `who` their share of round `r`'s damage pool. Anyone may trigger it.
     function claimDamage(uint64 r, address who) external nonReentrant {
         if (results[r].endedAt == 0) revert RoundNotOver();
-        if (sold[r][who]) revert SoldThisRound();
         if (damageClaimed[r][who]) revert AlreadyClaimed();
         uint256 amount = claimableDamage(r, who);
         if (amount == 0) revert NothingToClaim();
@@ -564,7 +796,7 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
 
     function claimableDamage(uint64 r, address who) public view returns (uint256) {
         RoundResult storage res = results[r];
-        if (res.endedAt == 0 || sold[r][who] || damageClaimed[r][who]) return 0;
+        if (res.endedAt == 0 || damageClaimed[r][who]) return 0;
         return BossMath.share(res.damagePool, damage[r][who], res.eligibleDamage);
     }
 
@@ -605,33 +837,7 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         return _poolId;
     }
 
-    // ---------------------------------------------------------------- identity and misc
-
-    /// @dev Who traded. The PoolManager hands the hook the router, never the user, so identity
-    /// comes from `hookData` (abi.encode(addr) or 20 packed bytes), then the router's
-    /// `msgSender()`, then `tx.origin`. Used only for buys, where naming someone can only gift them
-    /// damage or the kill credit. Sells are always attributed to `tx.origin` (the signer) in
-    /// afterSwap, so nobody can forfeit someone else's share. Identity is never used for authorization.
-    function _resolveTrader(address router, bytes calldata hookData) internal view returns (address trader) {
-        if (hookData.length == 32) {
-            uint256 word = uint256(bytes32(hookData[:32]));
-            if (word >> 160 == 0) trader = address(uint160(word));
-        } else if (hookData.length == 20) {
-            trader = address(bytes20(hookData[:20]));
-        }
-        if (trader == address(0)) trader = _routerMsgSender(router);
-        if (trader == address(0)) trader = tx.origin;
-    }
-
-    function _routerMsgSender(address router) internal view returns (address) {
-        if (router.code.length == 0) return address(0);
-        (bool ok, bytes memory data) =
-            router.staticcall{gas: MSG_SENDER_PROBE_GAS}(abi.encodeCall(IMsgSender.msgSender, ()));
-        if (!ok || data.length != 32) return address(0);
-        uint256 word = abi.decode(data, (uint256));
-        if (word >> 160 != 0) return address(0);
-        return address(uint160(word));
-    }
+    // ---------------------------------------------------------------- misc
 
     function _hasPairedDecimals(Currency currency) internal view returns (bool) {
         if (currency.isAddressZero()) return true;
