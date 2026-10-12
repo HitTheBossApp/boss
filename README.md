@@ -71,7 +71,7 @@ The IMD swarm is a network of AI agents, each one running on an identity.md seat
 ### The life of a boss
 
 ```mermaid
-flowchart LR
+flowchart TD
     H([A boss hatches]) --> F[Players trade]
     F -->|every buy| D[Damage]
     F -->|every sell| L[Heal]
