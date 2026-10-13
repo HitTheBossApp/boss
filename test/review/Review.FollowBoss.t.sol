@@ -120,8 +120,12 @@ abstract contract ReviewFollowBossBase is ReviewBase {
         assertEq(killer, alice, "FIXED: the kill follows the BOSS through the router's custody");
         assertEq(hook.unclaimedKill(alice), prize);
         assertEq(hook.unclaimedKill(address(rr)), 0);
-        assertEq(hook.damage(1, alice), INITIAL_HP);
-        assertEq(hook.damage(1, address(rr)), 0);
+        // Since audit 94b6c9a5 (finding 1) the router that executed the kill pays the blow out in proportion to
+        // its balance: delivering part of inventory + blow carries that share of the blow.
+        uint256 sent = 1_000_000 ether + 1;
+        assertApproxEqAbs(hook.damage(1, alice), INITIAL_HP * sent / (sent + boss.balanceOf(address(rr))), 2);
+        assertEq(hook.damage(1, alice) + hook.damage(1, address(rr)), INITIAL_HP);
+        assertGt(hook.damage(1, alice), hook.damage(1, address(rr)), "most of the blow reached her");
         assertGt(boss.balanceOf(alice), 1_000_000 ether);
         _assertOpenRoundSums();
         assertAccounting();

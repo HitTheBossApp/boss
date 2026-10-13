@@ -459,7 +459,8 @@ abstract contract Review4Base is BossFixture {
             vm.prank(bob, bob);
             ra.multi(calls);
             uint256 blowGas = ra.lastSprayGas();
-            assertEq(_killer(1), address(ra), "custodian keeps the largest share");
+            // Since audit 94b6c9a5 (review 7) the killing swap's router stops counting for the prize once it pays out.
+            assertTrue(_killer(1) != address(ra), "the paying custodian no longer holds the prize");
             vm.revertToState(snap);
 
             snap = vm.snapshotState();

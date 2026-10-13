@@ -513,16 +513,18 @@ abstract contract Review5Base is BossFixture {
         assertAccounting();
     }
 
-    /// @dev README: "The router that executed the killing swap holds the blow in custody and hands it on
-    /// first". A smart wallet that is its own router holds older BOSS, kills, keeps the blow and pays older
-    /// BOSS to dave: the blow goes first (documented; asserted as documented).
-    function test_r5_P3_ownRouterWallet_paysOlderBoss_blowGoesFirst_documented() public {
+    /// @dev Since audit 94b6c9a5 (finding 1) the locker that executed the kill pays the blow out in
+    /// proportion to its balance. A smart wallet that is its own router holds older BOSS, kills, keeps the
+    /// blow and pays older BOSS to dave: dave carries that payment's share of the blow.
+    function test_r5_P3_ownRouterWallet_paysOlderBoss_blowLeavesInProportion() public {
         (uint256 blowBoss, uint256 blowDmg) = _measureBlow();
         uint256 older = _plantOf(blowBoss); // the wallet's older BOSS (all of the blow's size, or > half of it)
         giveBoss(address(ra), older);
         _multi(ra, bob, _c(_run(_buyTake(2 ether, address(ra))), _fwdTo(dave, older)));
-        assertEq(_killer(1), dave, "documented: the locker hands the blow on first");
-        assertApproxEqAbs(hook.damage(1, dave), blowDmg * older / blowBoss, 2);
+        assertApproxEqAbs(hook.damage(1, dave), blowDmg * older / (older + blowBoss), 2, "the payment's share");
+        // Documented limit (README): a smart wallet that is its own router (not the signer) stops counting for
+        // the prize once it pays blow BOSS out, so its payee takes the prize (review 7's fix of planted BOSS).
+        assertEq(_killer(1), dave, "documented: the paying router-wallet hands on the prize");
         _assertSums();
         assertAccounting();
     }

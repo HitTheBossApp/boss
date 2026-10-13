@@ -178,6 +178,12 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     /// @dev Base of a per-wallet map: the killing blow's credit each wallet holds with its blow BOSS
     /// (the part of the closed round's credit that travels on hops; every other closed credit is frozen).
     bytes32 internal constant T_KILL_DMG = bytes32(uint256(14));
+    /// @dev The locker that executed the killing swap: the custodian of the blow, which pays it out in
+    /// proportion to its balance (a fee taken as a share, then a sweep).
+    bytes32 internal constant T_KILL_LOCKER = bytes32(uint256(15));
+    /// @dev Set once that locker starts paying the blow out to wallets: from then on it can no longer
+    /// hold the prize (unless it is the signer), so BOSS planted on it never keeps the prize there.
+    bytes32 internal constant T_KILL_PAID = bytes32(uint256(16));
 
     // ---------------------------------------------------------------- events
 
@@ -466,7 +472,7 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         uint256 len = ability.code.length;
         if (len == 0 || (len == 23 && bytes3(ability.code) == 0xef0100)) revert AbilityNotAContract();
         if (queuedAbility != address(0)) revert AbilityAlreadyQueued();
-        if (a.issuedAt <= board.proposedAt()) revert StaleAttestation();
+        if (a.issuedAt < board.proposedAt()) revert StaleAttestation();
         uint256 answer = _verifyAttestation(a, sig);
         if (answer != id * 2 + 1) revert NotApproved(answer);
 
@@ -616,6 +622,8 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         _tstore(T_KILL_DAMAGE, pd);
         _tstore(T_KILL_BOSS, pb);
         _tstore(T_KILL_N, 0);
+        _tstore(T_KILL_LOCKER, _tload(T_SENDER));
+        _tstore(T_KILL_PAID, 0);
         uint256 elig = eligibleDamage[r];
         (uint256 seed, uint256 killerPrize, uint256 damagePool) = BossMath.splitPot(pot, elig > 0);
         results[r] = RoundResult({
@@ -699,7 +707,7 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         // The open round first: its BOSS count is exact (it follows every transfer), so what is
         // left of the transfer after it is BOSS from earlier rounds.
         uint64 r = round;
-        (uint256 dmg, uint256 bossAmount) = _release(r, from, value);
+        (uint256 dmg, uint256 bossAmount) = _release(r, from, value, sink);
         if (bossAmount != 0) {
             if (sink) {
                 if (dmg != 0) {
@@ -724,17 +732,22 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
 
     /// @dev A hop in the transaction that closed round `kr`. Only the killing blow's BOSS carries that
     /// round's credit and its prize (a router that custodies the blow and then delivers it); every
-    /// other credit of the closed round stays where it is, as in any later transaction. A contract
-    /// (a router, an aggregator, a smart account) hands the blow on first, so BOSS anyone planted on
-    /// it never holds the blow back. A wallet without code spends its older BOSS first: what it still
-    /// holds after the transfer counts as blow BOSS, so older BOSS sent away never takes the blow
-    /// with it. A closed round is never forfeited, so blow BOSS going into a sink (`to` zero) leaves
-    /// its credit with `from`, held by nobody from then on.
+    /// other credit of the closed round stays where it is, as in any later transaction. Which BOSS
+    /// leaves a wallet cannot be seen, so: the locker that executed the killing swap (the custodian)
+    /// pays the blow out in proportion to its balance, so a fee taken as a share of it carries only
+    /// that share even with BOSS planted on it; any other contract (a forwarder) hands the blow on
+    /// first, so BOSS planted on it never holds the blow back; a wallet without code spends its older
+    /// BOSS first: what it still holds after the transfer counts as blow BOSS, so older BOSS sent away
+    /// never takes the blow with it. A closed round is never forfeited, so blow BOSS going into a sink
+    /// (`to` zero) leaves its credit with `from`, held by nobody from then on.
     function _hopBlow(uint64 kr, address from, address to, uint256 value) internal {
         uint256 hf = _tload(_heldSlot(kr, from));
         if (hf == 0) return;
         uint256 out;
-        if (from.code.length != 0) {
+        if (from == address(uint160(_tload(T_KILL_LOCKER)))) {
+            out = hf * value / (IBossToken(bossToken).balanceOf(from) + value);
+            if (to != address(0) && from != tx.origin) _tstore(T_KILL_PAID, 1);
+        } else if (from.code.length != 0) {
             out = value < hf ? value : hf;
         } else {
             uint256 left = IBossToken(bossToken).balanceOf(from);
@@ -820,9 +833,9 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     /// @dev Tracks how much of the killing blow's BOSS each wallet holds so far in this transaction
     /// (`from` is zero when the BOSS comes out of the pool, `to` is zero when it goes into a sink;
     /// on a hop only what `from` holds of it counts) and keeps the killer prize with whoever holds
-    /// the most: a router that custodies and delivers, an interface fee of a fraction of a percent,
-    /// a solver keeping a wei, a custodian that sells part of the blow back or another player's
-    /// transfer bundled after the kill never end up with it.
+    /// the most (the killing swap's router stops counting once it pays the blow out): an interface fee
+    /// of a fraction of a percent, a solver keeping a wei, a custodian that sells part of the blow back
+    /// or another player's transfer bundled after the kill never end up with it.
     function _trackKill(uint64 kr, address from, address to, uint256 amount) internal {
         if (from != address(0)) {
             bytes32 fs = _heldSlot(kr, from);
@@ -841,25 +854,32 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         address k = results[kr].killer;
         if (from == k) {
             // The holder of the most handed some away: whoever holds the most now takes the prize.
-            _recount(kr, k, to, ht);
-        } else if (to != address(0) && to != k && ht > _tload(_heldSlot(kr, k))) {
+            _recount(kr, k, to);
+        } else if (to != address(0) && to != k && _weight(kr, to) > _weight(kr, k)) {
             _moveKill(kr, k, to);
         }
     }
 
+    /// @dev What `w` holds of the blow, for the prize: the killing swap's locker stops counting once it
+    /// pays the blow out to wallets (see T_KILL_PAID).
+    function _weight(uint64 kr, address w) internal view returns (uint256) {
+        if (_tload(T_KILL_PAID) != 0 && w == address(uint160(_tload(T_KILL_LOCKER)))) return 0;
+        return _tload(_heldSlot(kr, w));
+    }
+
     /// @dev Moves the prize to the wallet that holds the most of the blow's BOSS. Ties stay with the
     /// current killer, then with `to` (the wallet that just received), then with the earliest listed.
-    function _recount(uint64 kr, address k, address to, uint256 ht) internal {
+    function _recount(uint64 kr, address k, address to) internal {
         address best = k;
-        uint256 most = _tload(_heldSlot(kr, k));
-        if (to != address(0) && ht > most) {
+        uint256 most = _weight(kr, k);
+        if (to != address(0) && _weight(kr, to) > most) {
             best = to;
-            most = ht;
+            most = _weight(kr, to);
         }
         uint256 n = _tload(T_KILL_N);
         for (uint256 i = 0; i < n; i++) {
             address w = address(uint160(_tload(keccak256(abi.encodePacked(T_KILL_LIST, i)))));
-            uint256 h = _tload(_heldSlot(kr, w));
+            uint256 h = _weight(kr, w);
             if (h > most) {
                 most = h;
                 best = w;
@@ -905,13 +925,19 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     }
 
     /// @dev Takes `value` BOSS worth of round `r` credit away from `from`, in proportion to the BOSS
-    /// it bought. A wallet with no buy this round has nothing to give up.
-    function _release(uint64 r, address from, uint256 value) internal returns (uint256 dmg, uint256 bossAmount) {
+    /// it bought. A wallet with no buy this round has nothing to give up. A forfeit (`up`) is a charge
+    /// on the wallet handing BOSS back, so it is rounded up; a move to another wallet rounds down.
+    function _release(uint64 r, address from, uint256 value, bool up)
+        internal
+        returns (uint256 dmg, uint256 bossAmount)
+    {
         uint256 owned = bought[r][from];
         if (owned == 0) return (0, 0);
-        (dmg, bossAmount) = _slice(damage[r][from], owned, value);
+        uint256 had = damage[r][from];
+        (dmg, bossAmount) = _slice(had, owned, value);
+        if (up && dmg * owned < had * bossAmount) dmg += 1;
         bought[r][from] = owned - bossAmount;
-        damage[r][from] -= dmg;
+        damage[r][from] = had - dmg;
     }
 
     function _credit(uint64 r, address to, uint256 dmg, uint256 bossAmount) internal {

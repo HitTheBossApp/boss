@@ -231,12 +231,19 @@ abstract contract Review2Base is ReviewBase {
         assertEq(_killer(1), address(rr), "a paid prize does not move");
         assertEq(hook.unclaimedKill(alice), 0);
         assertEq(hook.unclaimedKill(address(rr)), 0);
-        assertEq(hook.damage(1, alice), INITIAL_HP, "the damage did move");
+        // Since audit 94b6c9a5 (finding 1) the router that executed the kill pays the blow out in proportion to
+        // its balance: delivering part of inventory + blow carries that share of the blow.
+        uint256 sent = 1_000_000 ether + 1;
+        assertApproxEqAbs(
+            hook.damage(1, alice), INITIAL_HP * sent / (sent + boss.balanceOf(address(rr))), 2, "the damage did move"
+        );
         _assertOpenRoundSums();
         assertAccounting();
         uint256 paid = _claimEverything();
-        assertEq(paid, _pool(1), "only the damage pool was left to pay");
-        assertEq(hook.totalReserved(), 0);
+        // The damage pool is now split between alice and the router (proportional custody, audit 94b6c9a5):
+        // each share rounds down, so a wei of dust can stay (README: rounding dust stays in the hook).
+        assertApproxEqAbs(paid, _pool(1), 2, "only the damage pool was left to pay");
+        assertLe(hook.totalReserved(), 2);
         assertAccounting();
     }
 
@@ -288,7 +295,9 @@ abstract contract Review2Base is ReviewBase {
         vm.prank(alice, alice);
         script.run(a);
         assertEq(hook.bought(1, bob) + 1 >= hook.bought(1, carol), true);
-        assertEq(_killer(1), carol, "the last of two equal halves takes the prize");
+        // Since audit 94b6c9a5 (review 7) the router stops counting for the prize once it pays out, so the
+        // first half's receiver takes it, and an equal second half does not take it away (ties stay put).
+        assertEq(_killer(1), bob, "the first of two equal halves keeps the prize");
         assertEq(hook.unclaimedKill(address(script)), 0, "the router keeps nothing");
         assertApproxEqAbs(hook.damage(1, bob), 0.5 ether, 2);
         assertApproxEqAbs(hook.damage(1, carol), 0.5 ether, 2);

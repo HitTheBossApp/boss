@@ -123,3 +123,27 @@ wallet (griefing only, documented) and asked for clearer README wording on smart
   3,000 runs; invariants at 256 runs × depth 64; mainnet fork 5 passed.
 - `forge build --sizes`: BossHook runtime 23,817 bytes (limit 24,576; margin 759).
 - Gas with an active ability, router included: buy 262,990, sell 245,444; transfer 45,975 / 51,618.
+
+## Fourth swarm audit (job 94b6c9a5, 2026-10-13)
+
+The swarm audit of `7dc01c2` found 0 high, 1 medium, 1 low and 2 info.
+
+- Medium 1, BOSS planted on the Universal Router before a kill made its interface fee (a share of the
+  router's balance) carry the whole blow and the prize to the fee collector: the router that executed the
+  killing swap now pays the blow out in proportion to its balance, and once it pays blow BOSS out to a
+  wallet it no longer counts for the prize (unless it is the signer). Other contracts hand the blow on
+  first; wallets without code spend older BOSS first.
+- Low 2 (an ability that is a forwarder or has settable numbers): documented; condition (d) of the oracle
+  question covers it, enforced by the panel.
+- Info 3: an attestation issued in the proposal's second is accepted. Info 4: a forfeit rounds up.
+
+Independent review 7 (`test/review7/`, BOSS as currency0, currency1 and native ETH) found that the
+proportional rule let a router delivering an exact amount, with BOSS planted on it, keep the prize; fixed
+as above. Documented residuals: that router keeps its proportional share of the blow's credit; a router
+that sweeps a surplus (planted BOSS included) to its own wallet can hand that wallet the prize; a smart
+wallet that is its own router hands the prize to the first wallet it pays blow BOSS to.
+
+- `forge test`: 44 suites, 550 tests passed, 0 failed, 5 skipped (fork tests, need an RPC). 35 fuzz tests at
+  3,000 runs; invariants at 256 runs × depth 64; mainnet fork 5 passed.
+- `forge build --sizes`: BossHook runtime 24,219 bytes (limit 24,576; margin 357).
+- Gas with an active ability, router included: buy 262,990, sell 245,585; transfer 45,980 / 51,623.

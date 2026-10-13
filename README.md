@@ -78,7 +78,11 @@ whose token sorted above its pair; any other price reverts (`WrongStartingPrice`
 - The keeper cannot activate an ability without the oracle, move the pot, touch players' claims or pause trading.
 - An ability only returns two numbers. It must be a contract: a wallet, which its owner could delegate or
   re-delegate with EIP-7702 after the approval, is refused when it is accepted, delegated or not (audit
-  `853ff4df`, finding 4, and independent review 5).
+  `853ff4df`, finding 4, and independent review 5). That check pins the address, not the behaviour: a
+  forwarder or an ability with a settable target or settable numbers would pass it and could change after
+  the approval. Condition (d) of the oracle question (the contract does nothing but compute and return
+  the two numbers: no external calls, no state writes) keeps those out, and the panel enforces it, not the
+  hook (audit `94b6c9a5`, finding 2).
   It is called with `STATICCALL` and 50k gas and any failure falls back to 1x. A swap reverts if too little gas remains to give the ability its full 50k, so an ability cannot be
   starved into failing.
 - Gas, router included, with an active ability: buy about 263k, sell about 246k. A BOSS transfer costs about
@@ -133,12 +137,22 @@ The suite includes fuzz and invariant tests (money accounting, HP bounds, closed
   custodies it on the way; the killer prize goes to whoever holds the largest share of the BOSS that left
   the pool with the killing blow, re-decided whenever the largest holder hands some away (blow BOSS handed
   back to the pool or sent to the hook is held by nobody). Other BOSS moving in that transaction carries
-  neither closed-round credit nor the prize. A contract (a router, an aggregator, a smart account) hands
-  the blow on first, so BOSS anyone planted on a deployed contract never holds the blow back (independent
-  review 5); a wallet without code spends its older BOSS first, so sending older BOSS in the same
-  transaction never gives the blow away (finding 2). A smart account or an EIP-7702 wallet that kills and
-  then pays with older BOSS in the same transaction therefore hands the blow on with that payment: after a
-  small last hit, a fee in older BOSS at least as large as the blow hands on its whole credit and the whole
+  neither closed-round credit nor the prize. Which BOSS leaves a wallet cannot be seen, so three rules
+  apply. The router that executed the killing swap holds the blow in custody and pays it out in proportion
+  to its balance: an interface fee taken as a share of that balance carries only that share of the blow,
+  even with BOSS planted on the router (audit `94b6c9a5`, finding 1). Once it pays blow BOSS out to a
+  wallet it no longer counts for the prize (unless it is the signer), so BOSS planted on it never keeps the
+  prize there (independent review 7). What it keeps of the blow's credit stays with it: a router that sends
+  an exact amount while holding other BOSS (its own, or planted by anyone) keeps the blow's credit share of
+  that BOSS, and if anyone may sweep the router, a planter can take that share (never the prize). A router
+  that delivers a quoted amount and sweeps the surplus, planted BOSS included, to its own wallet can hand
+  that wallet the larger share and the prize. A smart wallet that is its own router (not the signer) hands
+  the prize to the first wallet it pays blow BOSS to. Any other contract (a forwarder) hands the blow on first,
+  so BOSS anyone planted on it never holds the blow back (independent review 5). A wallet without code
+  spends its older BOSS first, so sending older BOSS in the same transaction never gives the blow away
+  (audit `853ff4df`, finding 2). A smart account or an EIP-7702 wallet that kills through a router and then
+  pays with older BOSS in the same transaction therefore hands the blow on with that payment: after a small
+  last hit, a fee in older BOSS at least as large as the blow hands on its whole credit and the whole
   killer prize. A contract that trades from its constructor has no code yet and counts as a wallet, so BOSS
   planted on its address beforehand keeps the blow on it (independent review 6; griefing only, the planter
   gains nothing). BOSS the signer's

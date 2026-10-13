@@ -149,8 +149,11 @@ abstract contract BossForfeitBase is BossFixture {
         uint256 sold = got * sellBps / 10_000;
         vm.assume(sold > 0);
         sellExactIn(alice, sold);
-        uint256 expected = buyAmount - buyAmount * sold / got;
-        assertEq(hook.damage(1, alice), expected, "damage * (1 - sold / bought), rounded for the seller");
+        // A forfeit is a charge on the seller: rounded up (audit 94b6c9a5, info 4).
+        uint256 forfeit = buyAmount * sold / got;
+        if (forfeit * got < buyAmount * sold) forfeit += 1;
+        uint256 expected = buyAmount - forfeit;
+        assertEq(hook.damage(1, alice), expected, "damage * (1 - sold / bought), rounded against the seller");
         assertEq(hook.eligibleDamage(1), expected);
         assertAccounting();
     }
