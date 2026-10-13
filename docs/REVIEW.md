@@ -98,3 +98,28 @@ as currency0, as currency1 and with native ETH):
 - Gas with an active ability, router included: buy 262,990, sell 245,444; transfer 45,975 / 51,618.
 - Mainnet fork (`test/fork/UniversalRouter.t.sol`, `BOSS_FORK_RPC` set): 5 passed with these fixes, the
   interface-fee kill through the real Universal Router included.
+
+## Third swarm audit (job 853ff4df, 2026-10-13)
+
+The swarm audit of `54e917c` found 0 high, 1 medium, 3 low and 1 info. Fixed in code:
+
+- Medium 1, a bystander's closed-round credit moved with their BOSS inside the transaction that closed the
+  round: only the killing blow's BOSS now carries that round's credit (per-wallet transient blow credit,
+  `_hopBlow`); every other closed-round credit is frozen, as in any later transaction.
+- Low 2, a killer paying with older BOSS in the kill transaction gave the blow away: a wallet without code
+  spends its older BOSS first (blow leaving = blow held - balance after the transfer); a contract hands the
+  blow on first, so BOSS planted on a deployed custodian never holds it back.
+- Low 4: `acceptAbility` refuses an address with no code or with an EIP-7702 delegation designator.
+- Documented in the README: low 3 (a gross-settled buy and sell in one unlock charges the sold BOSS twice)
+  and info 5 (the start price depends on the ordering; the factory initializes at the ordering's price).
+
+Independent reviews 5 and 6 (`test/review5/`, `test/review6/`, BOSS as currency0, currency1 and native
+ETH): review 5 found an underflow when blow BOSS whose credit was already collected passed through the
+signer, a bypass of the 7702 check by revoking before the accept, and planted BOSS holding the blow back
+on a custodian; all three fixed. Review 6 found that a contract trading from its constructor counts as a
+wallet (griefing only, documented) and asked for clearer README wording on smart-account fees (done).
+
+- `forge test`: 40 suites, 486 tests passed, 0 failed, 5 skipped (fork tests, need an RPC). Fuzzers at
+  3,000 runs; invariants at 256 runs × depth 64; mainnet fork 5 passed.
+- `forge build --sizes`: BossHook runtime 23,817 bytes (limit 24,576; margin 759).
+- Gas with an active ability, router included: buy 262,990, sell 245,444; transfer 45,975 / 51,618.

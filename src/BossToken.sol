@@ -80,7 +80,7 @@ contract BossToken {
     }
 
     /// @dev Balances move first; then the hook hears about it. The hook's handler is bookkeeping
-    /// only (no external calls, no revert path), so it cannot block a transfer; if it ever did,
+    /// only (no writes outside the hook, no revert path), so it cannot block a transfer; if it ever did,
     /// the transfer fails rather than running without the game's accounting.
     function _transfer(address from, address to, uint256 value) internal {
         if (to == address(0)) revert TransferToZeroAddress();

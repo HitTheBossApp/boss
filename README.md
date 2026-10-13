@@ -52,7 +52,11 @@ keeper, board, oracle signer, question hash, initial HP, launch tick, paired cur
 swarm launch factory accepts; the oracle panel 21 and quorum 15 are source constants (`PANEL_SIZE`,
 `QUORUM`) and must match the IMD oracle request. The pin narrows the race but does not remove it: the first
 valid `initialize` still binds the hook, so the launch must deploy the hook and initialize the pool
-atomically.
+atomically. The start price depends on the ordering: `pool.initialPrice` in `launch.json` is the value for
+BOSS sorting below IMD (its notes give the other one), and the launch must initialize at
+`launchSqrtPriceX96(bossIsCurrency0)` for the ordering it gets, as the swarm did for WIN (launch-784),
+whose token sorted above its pair; any other price reverts (`WrongStartingPrice`) and nothing launches
+(audit `853ff4df`, finding 5).
 
 ## Trust model
 
@@ -72,8 +76,10 @@ atomically.
 - **The effect is bounded**: both multipliers are clamped to [0.25x, 4x], every change waits 12 hours in
   public before it applies, and at most one activation happens per 24 hours.
 - The keeper cannot activate an ability without the oracle, move the pot, touch players' claims or pause trading.
-- An ability only returns two numbers. It is called with `STATICCALL` and 50k gas and any failure falls back
-  to 1x. A swap reverts if too little gas remains to give the ability its full 50k, so an ability cannot be
+- An ability only returns two numbers. It must be a contract: a wallet, which its owner could delegate or
+  re-delegate with EIP-7702 after the approval, is refused when it is accepted, delegated or not (audit
+  `853ff4df`, finding 4, and independent review 5).
+  It is called with `STATICCALL` and 50k gas and any failure falls back to 1x. A swap reverts if too little gas remains to give the ability its full 50k, so an ability cannot be
   starved into failing.
 - Gas, router included, with an active ability: buy about 263k, sell about 246k. A BOSS transfer costs about
   46k, 52k when credit travels with it (`test/BossHook.Gas.t.sol`).
@@ -121,17 +127,31 @@ The suite includes fuzz and invariant tests (money accounting, HP bounds, closed
   lowers the credit your buy can earn (it never raises anyone's). In one transaction, selling BOSS that
   appreciated since it was bought heals a little more than the credit it forfeits, and that difference is
   taken from the credit of a later buy in the same transaction (in two transactions it is not).
-- The killing blow and its damage are credited to the signer at the kill and travel with that BOSS for
-  the rest of the transaction, through any router, aggregator or solver that custodies it on the way;
-  the killer prize goes to whoever holds the largest share of the BOSS that left the pool with the killing
-  blow, re-decided whenever the largest holder hands some away (blow BOSS handed back to the pool or sent
-  to the hook is held by nobody; other BOSS of that round moving in the same transaction carries its
-  credit but never the prize). BOSS the signer's router takes out of the pool later in that transaction
-  is counted as the killing blow's first. What never leaves the pool in that transaction (claims, a flash
-  round trip), or is still inside when another router swaps, stays with the signer (unless another party
-  takes BOSS out first, see above); a router that
-  delivers the BOSS in a later transaction keeps the kill; and of two kills in one transaction only the
-  last one travels.
+- A closed round's credit is frozen, as in any later transaction, except the killing blow's (audit
+  `853ff4df`, finding 1). The killing blow and its damage are credited to the signer at the kill and
+  travel with that BOSS for the rest of the transaction, through any router, aggregator or solver that
+  custodies it on the way; the killer prize goes to whoever holds the largest share of the BOSS that left
+  the pool with the killing blow, re-decided whenever the largest holder hands some away (blow BOSS handed
+  back to the pool or sent to the hook is held by nobody). Other BOSS moving in that transaction carries
+  neither closed-round credit nor the prize. A contract (a router, an aggregator, a smart account) hands
+  the blow on first, so BOSS anyone planted on a deployed contract never holds the blow back (independent
+  review 5); a wallet without code spends its older BOSS first, so sending older BOSS in the same
+  transaction never gives the blow away (finding 2). A smart account or an EIP-7702 wallet that kills and
+  then pays with older BOSS in the same transaction therefore hands the blow on with that payment: after a
+  small last hit, a fee in older BOSS at least as large as the blow hands on its whole credit and the whole
+  killer prize. A contract that trades from its constructor has no code yet and counts as a wallet, so BOSS
+  planted on its address beforehand keeps the blow on it (independent review 6; griefing only, the planter
+  gains nothing). BOSS the signer's
+  router takes out of the pool later in that transaction is counted as the killing blow's first. What
+  never leaves the pool in that transaction (claims, a flash round trip), or is still inside when another
+  router swaps, stays with the signer (unless another party takes BOSS out first, see above); a router
+  that delivers the BOSS in a later transaction keeps the kill; and of two kills in one transaction only
+  the last one travels.
+- A buy and a sell of BOSS in one unlock settled gross (the sell's BOSS paid into the pool from your
+  wallet while the buy's BOSS is taken out in full) charges the sold BOSS twice: the sell takes back that
+  much of the buy's pending credit and your wallet forfeits its own credit for the BOSS it paid in (audit
+  `853ff4df`, finding 3, a loss for that player only; nobody gains). Settled net, as standard routers do,
+  it is charged once.
 - The signer of a relayed or bundled transaction is the relayer or bundler (`tx.origin`). If your router
   keeps the killing BOSS inside the PoolManager (ERC-6909 claims, liquidity) or delivers it in a later
   transaction, the relayer or bundler keeps the kill and its damage (audit `be67d693`, finding 5). Every

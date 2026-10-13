@@ -48,7 +48,9 @@ abstract contract Review2Base is ReviewBase {
         uint256 pb = hook.bought(1, alice);
         assertGt(bobBoss, pb, "bob's round-1 BOSS exceeds the killing blow's");
         assertEq(hook.damage(1, alice), 0.2 ether, "alice holds the whole killing blow");
-        assertEq(hook.damage(1, carol), 0.8 ether, "bob's credit moved with his BOSS, as designed");
+        // Since audit 853ff4df finding 1: a closed round is frozen except for the killing blow.
+        assertEq(hook.damage(1, carol), 0, "bob's closed-round credit stays with bob");
+        assertEq(hook.damage(1, bob), 0.8 ether);
         _assertOpenRoundSums();
         assertAccounting();
         console2.log("P1 killer:", _killer(1));
@@ -77,7 +79,9 @@ abstract contract Review2Base is ReviewBase {
         rr.multi(calls);
 
         assertEq(hook.damage(1, bob), 0.1 ether, "bob holds the whole killing blow");
-        assertEq(hook.damage(1, carol), 0.9 ether, "carol holds alice's old credit");
+        // Since audit 853ff4df finding 1: a closed round is frozen except for the killing blow.
+        assertEq(hook.damage(1, carol), 0, "carol gets alice's old BOSS, not its credit");
+        assertEq(hook.damage(1, alice), 0.9 ether, "alice keeps her old credit");
         assertGt(got, hook.bought(1, bob), "the old position is larger than the blow");
         _assertOpenRoundSums();
         assertAccounting();
@@ -164,21 +168,19 @@ abstract contract Review2Base is ReviewBase {
         vm.prank(alice, alice);
         script.run(a);
 
-        uint256 pb = hook.bought(1, alice) + hook.bought(1, bob) + (hook.bought(1, carol) - b0);
-        assertApproxEqAbs(hook.bought(1, alice), pb / 2, 2, "alice: the half that came through the router");
+        // Since audit 853ff4df finding 1: a closed round is frozen except for the killing blow: her pre-kill 0.3 stays with her when she hands carol everything she holds; only
+        // the quarter of the blow she held travels (her wallet spends older BOSS first, so all of the blow
+        // she held is what left: nothing else remained). The router that executed the kill delivers its half.
+        uint256 pb = (hook.bought(1, alice) - b0) + hook.bought(1, bob) + hook.bought(1, carol);
+        assertApproxEqAbs(boss.balanceOf(alice), pb / 2, 2, "alice: the half that came through the router");
         assertApproxEqAbs(hook.bought(1, bob), pb / 4, 2);
-        assertApproxEqAbs(
-            hook.bought(1, carol), b0 + pb / 4, 2, "carol: her old BOSS plus the quarter that arrived first"
-        );
-        assertApproxEqAbs(hook.damage(1, alice), 0.35 ether, 1e6);
+        assertApproxEqAbs(hook.bought(1, carol), pb / 4, 2, "carol: the quarter of the blow alice held");
+        assertApproxEqAbs(hook.damage(1, alice), 0.3 ether + 0.35 ether, 1e6, "her pre-kill credit plus the router's half");
         assertApproxEqAbs(hook.damage(1, bob), 0.175 ether, 1e6);
-        assertApproxEqAbs(hook.damage(1, carol), 0.475 ether, 1e6);
+        assertApproxEqAbs(hook.damage(1, carol), 0.175 ether, 1e6);
         assertEq(hook.damage(1, address(script)) + hook.bought(1, address(script)), 0);
         assertEq(hook.damage(1, alice) + hook.damage(1, bob) + hook.damage(1, carol), INITIAL_HP);
         assertEq(hook.eligibleDamage(1), INITIAL_HP);
-        assertEq(hook.bought(1, alice), boss.balanceOf(alice), "nothing stale: counts equal balances");
-        assertEq(hook.bought(1, bob), boss.balanceOf(bob));
-        assertEq(hook.bought(1, carol), boss.balanceOf(carol));
         console2.log("P4 killer:", _killer(1));
         console2.log("P4 alice / carol:", alice, carol);
         assertAccounting();
@@ -264,9 +266,10 @@ abstract contract Review2Base is ReviewBase {
 
         assertEq(boss.balanceOf(alice), 0);
         assertEq(hook.damage(1, bob), 0.7 ether, "bob got exactly the killing blow");
-        assertEq(hook.damage(1, carol), 0.3 ether, "her stale pre-kill credit travelled with uncredited BOSS");
-        assertEq(hook.damage(1, alice), 0);
-        assertEq(hook.bought(1, carol), b0);
+        // Since audit 853ff4df finding 1: a closed round is frozen except for the killing blow: uncredited BOSS hopped later carries nothing.
+        assertEq(hook.damage(1, carol), 0, "her stale pre-kill credit no longer travels with uncredited BOSS");
+        assertEq(hook.damage(1, alice), 0.3 ether);
+        assertEq(hook.bought(1, carol), 0);
         assertEq(hook.damage(2, alice) + hook.damage(2, carol) + hook.damage(2, bob), 0);
         _assertOpenRoundSums();
         assertAccounting();
@@ -508,7 +511,9 @@ abstract contract Review2Base is ReviewBase {
             boss.balanceOf(address(manager)), pmBoss + b - hook.bought(1, alice), "bob's BOSS went back into the pool"
         );
         assertEq(boss.balanceOf(bob), 0);
-        assertEq(hook.damage(1, carol), 0.8 ether, "his frozen round-1 credit travelled with uncredited BOSS");
+        // Since audit 853ff4df finding 1: a closed round is frozen except for the killing blow.
+        assertEq(hook.damage(1, carol), 0, "his frozen round-1 credit no longer travels with uncredited BOSS");
+        assertEq(hook.damage(1, bob), 0.8 ether);
         assertEq(hook.damage(1, alice), 0.2 ether);
         _assertOpenRoundSums();
         assertAccounting();

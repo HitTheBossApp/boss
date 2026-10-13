@@ -431,8 +431,8 @@ abstract contract BossFollowBossBase is BossFixture {
     }
 
     /// @dev The signer holds the killing credit from the kill until the BOSS leaves the pool. If she
-    /// moves BOSS of her own in between, only what she really holds may travel: the credit of BOSS
-    /// still inside the pool stays put, and its later arrival never underflows her balance.
+    /// moves BOSS of her own in between, nothing of the closed round travels with it (only the blow's
+    /// BOSS carries closed credit, audit 853ff4df finding 1), and the later arrival never underflows.
     function test_signerMovesHerOwnBossBeforeTheKillBossArrives_onlyWhatSheHoldsTravels() public {
         uint256 early = uint256(bossDeltaOf(buyExactIn(alice, 0.1 ether))); // cheap early BOSS, small credit
         vm.prank(alice);
@@ -443,11 +443,12 @@ abstract contract BossFollowBossBase is BossFixture {
         a[2] = script.takeBoss(carol, type(uint256).max); // the kill's BOSS arrives, for carol
         vm.prank(alice, alice);
         script.run(a);
-        assertEq(hook.damage(1, bob), 0.1 ether, "bob got alice's early BOSS and its credit, nothing more");
-        assertEq(hook.bought(1, bob), early);
+        assertEq(hook.damage(1, bob), 0, "bob got alice's early BOSS, not its closed-round credit");
+        assertEq(hook.bought(1, bob), 0);
+        assertEq(boss.balanceOf(bob), early);
         assertEq(hook.damage(1, carol), INITIAL_HP - 0.1 ether, "the killing blow went with its BOSS to carol");
-        assertEq(hook.damage(1, alice), 0);
-        assertEq(hook.bought(1, alice), 0);
+        assertEq(hook.damage(1, alice), 0.1 ether, "her early credit stays with her");
+        assertEq(hook.bought(1, alice), early);
         (address killer,,,,) = hook.results(1);
         assertEq(killer, carol);
         assertEq(hook.eligibleDamage(1), INITIAL_HP);
@@ -455,8 +456,8 @@ abstract contract BossFollowBossBase is BossFixture {
     }
 
     /// @dev A shared bundle (4337, 7702): after alice's killing blow, another player's transfer runs
-    /// in the same transaction. Bob's BOSS carries bob's credit, as always, but it is not the kill's
-    /// BOSS: the prize stays where the killing blow went.
+    /// in the same transaction. Bob's BOSS is not the kill's BOSS: neither his closed-round credit nor
+    /// the prize moves with it (audit 853ff4df, finding 1); the prize stays where the killing blow went.
     function test_sharedBundle_anotherPlayersTransferAfterTheKill_doesNotTakeThePrize() public {
         buyExactIn(bob, 0.8 ether); // bob's position is far larger than the killing blow's BOSS
         vm.prank(bob);
@@ -471,14 +472,16 @@ abstract contract BossFollowBossBase is BossFixture {
         assertEq(killer, alice, "the prize follows the killing blow's BOSS, not any BOSS of the round");
         assertEq(hook.unclaimedKill(alice), prize);
         assertEq(hook.unclaimedKill(carol), 0);
-        assertEq(hook.damage(1, carol), 0.8 ether, "bob's credit still travelled with bob's BOSS");
+        assertEq(hook.damage(1, carol), 0, "bob's closed-round credit stays with bob");
+        assertEq(hook.damage(1, bob), 0.8 ether);
         assertEq(hook.damage(1, alice), INITIAL_HP - 0.8 ether);
         assertEq(hook.eligibleDamage(1), INITIAL_HP);
         assertAccounting();
     }
 
-    /// @dev The signer moves BOSS she bought before the kill after the kill's BOSS went to bob:
-    /// her old credit travels with it, the prize does not.
+    /// @dev The signer moves BOSS she bought before the kill after the kill's BOSS went to bob. A
+    /// closed round is frozen except for the killing blow (audit 853ff4df, finding 1): her old credit
+    /// stays with her, and the prize stays with the blow.
     function test_signerMovesOldBossAfterTheKill_prizeStaysWithTheKillBoss() public {
         uint256 early = uint256(bossDeltaOf(buyExactIn(alice, 0.9 ether))); // a large early position
         vm.prank(alice);
@@ -493,9 +496,9 @@ abstract contract BossFollowBossBase is BossFixture {
         assertEq(killer, bob, "bob holds all of the killing blow's BOSS");
         assertEq(hook.unclaimedKill(bob), prize);
         assertEq(hook.unclaimedKill(carol), 0);
-        assertEq(hook.damage(1, carol), 0.9 ether, "alice's old credit went with her old BOSS");
+        assertEq(hook.damage(1, carol), 0, "alice's old credit does not travel after the round closed");
         assertEq(hook.damage(1, bob), INITIAL_HP - 0.9 ether);
-        assertEq(hook.damage(1, alice), 0);
+        assertEq(hook.damage(1, alice), 0.9 ether, "it stays with her");
         assertAccounting();
     }
 

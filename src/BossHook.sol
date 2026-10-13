@@ -175,6 +175,9 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     bytes32 internal constant T_KILL_N = bytes32(uint256(10));
     bytes32 internal constant T_KILL_LIST = bytes32(uint256(11));
     bytes32 internal constant T_KILL_SEEN = bytes32(uint256(12));
+    /// @dev Base of a per-wallet map: the killing blow's credit each wallet holds with its blow BOSS
+    /// (the part of the closed round's credit that travels on hops; every other closed credit is frozen).
+    bytes32 internal constant T_KILL_DMG = bytes32(uint256(14));
 
     // ---------------------------------------------------------------- events
 
@@ -231,6 +234,7 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     error StaleAttestation();
     error NotApproved(uint256 answer);
     error AbilityAlreadyQueued();
+    error AbilityNotAContract();
 
     modifier onlyPoolManager() {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
@@ -455,6 +459,12 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         _syncAbility();
         (uint256 id, address ability) = board.pending();
         if (ability == address(0) || id <= acceptedId) revert NothingPending();
+        // An ability is an immutable contract. An EOA can be (re-)delegated with EIP-7702 at any time:
+        // with no code now, or with 23 bytes of code (0xef0100 || target), it is refused. No contract's
+        // code can start with 0xef (EIP-3541), and a contract can never become an EOA, so what passes
+        // here keeps its code.
+        uint256 len = ability.code.length;
+        if (len == 0 || (len == 23 && bytes3(ability.code) == 0xef0100)) revert AbilityNotAContract();
         if (queuedAbility != address(0)) revert AbilityAlreadyQueued();
         if (a.issuedAt <= board.proposedAt()) revert StaleAttestation();
         uint256 answer = _verifyAttestation(a, sig);
@@ -674,8 +684,9 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     /// transaction's pending credit (and the killing blow, if the round just closed) to the wallet
     /// that receives it. BOSS leaving a wallet takes that wallet's credit with it, in proportion to
     /// the BOSS it bought this round: forfeited when the BOSS goes into the pool (or into this hook,
-    /// where BOSS can never move again), moved when it goes to another wallet. Bookkeeping only: no
-    /// external calls, and no revert path beyond the caller check, so it can never block a transfer.
+    /// where BOSS can never move again), moved when it goes to another wallet. Bookkeeping only: its
+    /// one external call is a read of the BOSS token's balance (in the transaction of a kill), and it
+    /// has no revert path beyond the caller check, so it can never block a transfer.
     function onBossTransfer(address from, address to, uint256 value) external {
         if (msg.sender != bossToken) revert NotBossToken();
         if (value == 0 || from == to) return;
@@ -708,20 +719,53 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         if (value == 0) return;
         uint64 kr = uint64(_tload(T_KILL_ROUND));
         if (kr == 0) return;
-        // A round this transaction closed: its credit still travels on later hops (a router that
-        // custodies the killing blow's BOSS and then delivers it). A closed round is never
-        // forfeited, so BOSS going into a sink leaves its credit where it was.
-        if (!sink && !damageClaimed[kr][from]) {
-            (uint256 kd, uint256 kb) = _releaseClosed(kr, from, value);
-            if (kb != 0) {
-                damage[kr][to] += kd;
-                bought[kr][to] += kb;
-                emit DamageMoved(kr, from, to, kd, kb);
+        _hopBlow(kr, from, sink ? address(0) : to, value);
+    }
+
+    /// @dev A hop in the transaction that closed round `kr`. Only the killing blow's BOSS carries that
+    /// round's credit and its prize (a router that custodies the blow and then delivers it); every
+    /// other credit of the closed round stays where it is, as in any later transaction. A contract
+    /// (a router, an aggregator, a smart account) hands the blow on first, so BOSS anyone planted on
+    /// it never holds the blow back. A wallet without code spends its older BOSS first: what it still
+    /// holds after the transfer counts as blow BOSS, so older BOSS sent away never takes the blow
+    /// with it. A closed round is never forfeited, so blow BOSS going into a sink (`to` zero) leaves
+    /// its credit with `from`, held by nobody from then on.
+    function _hopBlow(uint64 kr, address from, address to, uint256 value) internal {
+        uint256 hf = _tload(_heldSlot(kr, from));
+        if (hf == 0) return;
+        uint256 out;
+        if (from.code.length != 0) {
+            out = value < hf ? value : hf;
+        } else {
+            uint256 left = IBossToken(bossToken).balanceOf(from);
+            out = hf > left ? hf - left : 0;
+            if (out > value) out = value;
+        }
+        if (out == 0) return;
+        bytes32 fd = _blowDmgSlot(kr, from);
+        uint256 dh = _tload(fd);
+        uint256 dOut = out == hf ? dh : dh * out / hf;
+        _tstore(fd, dh - dOut);
+        // Credit `from` already collected stays collected: it is not paid twice. A wallet that got
+        // blow BOSS whose credit was already collected holds the BOSS without its credit.
+        if (to != address(0) && !damageClaimed[kr][from]) {
+            uint256 bf = bought[kr][from];
+            uint256 bOut = out < bf ? out : bf;
+            if (dOut != 0 || bOut != 0) {
+                damage[kr][from] -= dOut;
+                bought[kr][from] = bf - bOut;
+                damage[kr][to] += dOut;
+                bought[kr][to] += bOut;
+                emit DamageMoved(kr, from, to, dOut, bOut);
+                bytes32 td = _blowDmgSlot(kr, to);
+                _tstore(td, _tload(td) + dOut);
             }
         }
-        // The prize only follows BOSS that left the pool with the killing blow, whatever other
-        // BOSS of that round the transfer carries; blow BOSS handed to a sink is held by nobody.
-        _trackKill(kr, from, sink ? address(0) : to, value);
+        _trackKill(kr, from, to, out);
+    }
+
+    function _blowDmgSlot(uint64 kr, address who) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(T_KILL_DMG, kr, who));
     }
 
     /// @dev BOSS left the pool for `to`: first the killing credit of a round this transaction closed
@@ -738,15 +782,27 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
             _tstore(T_KILL_DAMAGE, kd - dmg);
             _tstore(T_KILL_BOSS, kb - bossAmount);
             address signer = tx.origin;
-            // Credit the signer already collected stays collected: it is not paid twice.
-            if (!sink && to != signer && !damageClaimed[kr][signer]) {
-                damage[kr][signer] -= dmg;
-                bought[kr][signer] -= bossAmount;
-                damage[kr][to] += dmg;
-                bought[kr][to] += bossAmount;
-                emit DamageMoved(kr, signer, to, dmg, bossAmount);
+            if (!sink) {
+                // Credit the signer already collected stays collected: it is not paid twice.
+                bool moved = to != signer && !damageClaimed[kr][signer];
+                if (moved) {
+                    // The signer's count can be short when blow BOSS whose credit was already
+                    // collected passed through her: never below zero.
+                    uint256 bs = bought[kr][signer];
+                    uint256 bm = bossAmount < bs ? bossAmount : bs;
+                    damage[kr][signer] -= dmg;
+                    bought[kr][signer] = bs - bm;
+                    damage[kr][to] += dmg;
+                    bought[kr][to] += bm;
+                    emit DamageMoved(kr, signer, to, dmg, bm);
+                }
+                // The blow's credit `to` now holds travels with that BOSS on later hops.
+                if (moved || to == signer) {
+                    bytes32 td = _blowDmgSlot(kr, to);
+                    _tstore(td, _tload(td) + dmg);
+                }
+                _trackKill(kr, address(0), to, bossAmount);
             }
-            if (!sink) _trackKill(kr, address(0), to, bossAmount);
             value -= bossAmount;
             if (value == 0) return;
         }
@@ -856,24 +912,6 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         (dmg, bossAmount) = _slice(damage[r][from], owned, value);
         bought[r][from] = owned - bossAmount;
         damage[r][from] -= dmg;
-    }
-
-    /// @dev `_release` for the round this transaction closed. The signer holds the killing credit
-    /// of BOSS that has not left the pool yet; that part cannot travel on her own transfers until
-    /// it arrives, only what she really holds does.
-    function _releaseClosed(uint64 kr, address from, uint256 value) internal returns (uint256 dmg, uint256 bossAmount) {
-        uint256 owned = bought[kr][from];
-        uint256 had = damage[kr][from];
-        if (from == tx.origin) {
-            uint256 kb = _tload(T_KILL_BOSS);
-            uint256 kd = _tload(T_KILL_DAMAGE);
-            owned = owned > kb ? owned - kb : 0;
-            had = had > kd ? had - kd : 0;
-        }
-        if (owned == 0) return (0, 0);
-        (dmg, bossAmount) = _slice(had, owned, value);
-        bought[kr][from] -= bossAmount;
-        damage[kr][from] -= dmg;
     }
 
     function _credit(uint64 r, address to, uint256 dmg, uint256 bossAmount) internal {

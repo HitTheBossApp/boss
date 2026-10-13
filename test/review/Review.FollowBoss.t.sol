@@ -303,11 +303,10 @@ abstract contract ReviewFollowBossBase is ReviewBase {
         calls[3] = abi.encodeCall(rr.unlockWith, (u2)); // the kill's BOSS finally leaves the pool, to bob
         vm.prank(alice, alice);
         rr.multi(calls);
-        // Inside the kill's transaction the closed round's credit travels with the BOSS too: alice's own
-        // round-1 BOSS took its 0.3 to carol, half came back; the killing blow waited for its BOSS.
-        assertApproxEqAbs(hook.damage(1, carol), 0.15 ether, 1, "carol keeps the half of alice's credit she still holds");
-        assertApproxEqAbs(hook.damage(1, alice), 0.15 ether, 1, "alice got half of it back, none of the killing blow");
-        assertEq(hook.damage(1, alice) + hook.damage(1, carol), 0.3 ether);
+        // Since audit 853ff4df (finding 1) a closed round is frozen except for the killing blow: alice's
+        // own round-1 BOSS leaves without its 0.3, which stays with her; the killing blow waited for its BOSS.
+        assertEq(hook.damage(1, carol), 0, "carol gets alice's old BOSS, not its closed-round credit");
+        assertEq(hook.damage(1, alice), 0.3 ether, "alice keeps her 0.3, none of the killing blow");
         assertEq(hook.damage(1, bob), 0.7 ether, "bob got the killing blow");
         assertEq(hook.damage(2, carol) + hook.damage(2, alice), 0, "round-2 transfers moved nothing");
         _assertOpenRoundSums();
