@@ -156,7 +156,7 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     bytes32 internal constant T_PEND_BOSS = bytes32(uint256(3));
     /// @dev The round this transaction closed, and how much of its killing credit (held by the signer
     /// since the kill) still has BOSS to leave the pool and carry it. HELD: base of a per-wallet
-    /// map of how much of that BOSS each wallet holds so far; the killer prize follows the largest.
+    /// map of how much of that BOSS each wallet holds so far; the prize goes to a majority holder.
     bytes32 internal constant T_KILL_ROUND = bytes32(uint256(4));
     bytes32 internal constant T_KILL_DAMAGE = bytes32(uint256(5));
     bytes32 internal constant T_KILL_BOSS = bytes32(uint256(6));
@@ -170,11 +170,8 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     /// then included. A locker change trims it to the HP left. HP0_ROUND is the round it belongs to.
     bytes32 internal constant T_PEND_HP0 = bytes32(uint256(9));
     bytes32 internal constant T_HP0_ROUND = bytes32(uint256(13));
-    /// @dev Wallets that received the killing blow's BOSS (count, list, seen flags), so the prize can
-    /// be re-decided when the holder of the most hands some of it away.
-    bytes32 internal constant T_KILL_N = bytes32(uint256(10));
-    bytes32 internal constant T_KILL_LIST = bytes32(uint256(11));
-    bytes32 internal constant T_KILL_SEEN = bytes32(uint256(12));
+    /// @dev The killing blow's BOSS at the kill: the prize goes to a wallet that holds more than half of it.
+    bytes32 internal constant T_KILL_TOTAL = bytes32(uint256(10));
     /// @dev Base of a per-wallet map: the killing blow's credit each wallet holds with its blow BOSS
     /// (the part of the closed round's credit that travels on hops; every other closed credit is frozen).
     bytes32 internal constant T_KILL_DMG = bytes32(uint256(14));
@@ -581,6 +578,8 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         uint256 h = hp;
         uint256 room = h0 > h ? h0 - h : 0;
         if (pd > room) {
+            // The BOSS that carried the credit cut is cut with it: it must not weigh in later forfeits.
+            _tstore(T_PEND_BOSS, _tload(T_PEND_BOSS) * room / pd);
             pd = room;
             _tstore(T_PEND_DAMAGE, pd);
         }
@@ -613,6 +612,18 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     /// (`_arrive`).
     function _kill(address killer) internal {
         uint64 r = round;
+        // A previous kill in this transaction stops travelling here: a prize still on the router that
+        // executed it, or on no majority holder of its blow, goes to the signer.
+        uint64 pk = uint64(_tload(T_KILL_ROUND));
+        if (pk != 0) {
+            address h = results[pk].killer;
+            if (
+                h != tx.origin
+                    && (h == address(uint160(_tload(T_KILL_LOCKER))) || 2 * _weight(pk, h) <= _tload(T_KILL_TOTAL))
+            ) _moveKill(pk, h, tx.origin);
+        }
+        // The blow's BOSS is all the BOSS its buys took out; the cap only cuts what the open round counts.
+        uint256 blow = _tload(T_PEND_BOSS);
         uint256 pd = _cappedPending();
         uint256 pb = _tload(T_PEND_BOSS);
         _tstore(T_PEND_DAMAGE, 0);
@@ -620,8 +631,8 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
         _credit(r, killer, pd, pb);
         _tstore(T_KILL_ROUND, r);
         _tstore(T_KILL_DAMAGE, pd);
-        _tstore(T_KILL_BOSS, pb);
-        _tstore(T_KILL_N, 0);
+        _tstore(T_KILL_BOSS, blow);
+        _tstore(T_KILL_TOTAL, blow);
         _tstore(T_KILL_LOCKER, _tload(T_SENDER));
         _tstore(T_KILL_PAID, 0);
         uint256 elig = eligibleDamage[r];
@@ -819,9 +830,10 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
             value -= bossAmount;
             if (value == 0) return;
         }
+        if (_tload(T_PEND_BOSS) == 0) return;
+        uint256 pd = _cappedPending();
         uint256 pb = _tload(T_PEND_BOSS);
         if (pb == 0) return;
-        uint256 pd = _cappedPending();
         (uint256 dmg2, uint256 boss2) = _slice(pd, pb, value);
         _tstore(T_PEND_DAMAGE, pd - dmg2);
         _tstore(T_PEND_BOSS, pb - boss2);
@@ -832,10 +844,11 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
 
     /// @dev Tracks how much of the killing blow's BOSS each wallet holds so far in this transaction
     /// (`from` is zero when the BOSS comes out of the pool, `to` is zero when it goes into a sink;
-    /// on a hop only what `from` holds of it counts) and keeps the killer prize with whoever holds
-    /// the most (the killing swap's router stops counting once it pays the blow out): an interface fee
-    /// of a fraction of a percent, a solver keeping a wei, a custodian that sells part of the blow back
-    /// or another player's transfer bundled after the kill never end up with it.
+    /// on a hop only what `from` holds of it counts). The killer prize goes to the wallet that holds
+    /// more than half of the blow's BOSS (the killing swap's router stops counting once it pays the
+    /// blow out); while no wallet does, it stays with the signer. A fee of any share, a solver keeping
+    /// a wei, BOSS planted on a router, a custodian that sells part of the blow back or another player's
+    /// transfer bundled after the kill never take it from the wallet that receives most of the blow.
     function _trackKill(uint64 kr, address from, address to, uint256 amount) internal {
         if (from != address(0)) {
             bytes32 fs = _heldSlot(kr, from);
@@ -844,20 +857,16 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
             if (amount == 0) return;
             _tstore(fs, hf - amount);
         }
-        uint256 ht;
         if (to != address(0)) {
             bytes32 ts = _heldSlot(kr, to);
-            ht = _tload(ts) + amount;
-            _tstore(ts, ht);
-            _listHolder(kr, to);
+            _tstore(ts, _tload(ts) + amount);
         }
         address k = results[kr].killer;
-        if (from == k) {
-            // The holder of the most handed some away: whoever holds the most now takes the prize.
-            _recount(kr, k, to);
-        } else if (to != address(0) && to != k && _weight(kr, to) > _weight(kr, k)) {
-            _moveKill(kr, k, to);
-        }
+        uint256 total = _tload(T_KILL_TOTAL);
+        address w = tx.origin;
+        if (to != address(0) && 2 * _weight(kr, to) > total) w = to;
+        else if (2 * _weight(kr, k) > total) w = k;
+        if (w != k) _moveKill(kr, k, w);
     }
 
     /// @dev What `w` holds of the blow, for the prize: the killing swap's locker stops counting once it
@@ -865,37 +874,6 @@ contract BossHook is IHooks, IUnlockCallback, OracleGate {
     function _weight(uint64 kr, address w) internal view returns (uint256) {
         if (_tload(T_KILL_PAID) != 0 && w == address(uint160(_tload(T_KILL_LOCKER)))) return 0;
         return _tload(_heldSlot(kr, w));
-    }
-
-    /// @dev Moves the prize to the wallet that holds the most of the blow's BOSS. Ties stay with the
-    /// current killer, then with `to` (the wallet that just received), then with the earliest listed.
-    function _recount(uint64 kr, address k, address to) internal {
-        address best = k;
-        uint256 most = _weight(kr, k);
-        if (to != address(0) && _weight(kr, to) > most) {
-            best = to;
-            most = _weight(kr, to);
-        }
-        uint256 n = _tload(T_KILL_N);
-        for (uint256 i = 0; i < n; i++) {
-            address w = address(uint160(_tload(keccak256(abi.encodePacked(T_KILL_LIST, i)))));
-            uint256 h = _weight(kr, w);
-            if (h > most) {
-                most = h;
-                best = w;
-            }
-        }
-        if (best != k) _moveKill(kr, k, best);
-    }
-
-    /// @dev Records a wallet that received blow BOSS, once per closed round.
-    function _listHolder(uint64 kr, address who) internal {
-        bytes32 seen = keccak256(abi.encodePacked(T_KILL_SEEN, kr, who));
-        if (_tload(seen) != 0) return;
-        _tstore(seen, 1);
-        uint256 n = _tload(T_KILL_N);
-        _tstore(keccak256(abi.encodePacked(T_KILL_LIST, n)), uint160(who));
-        _tstore(T_KILL_N, n + 1);
     }
 
     function _heldSlot(uint64 kr, address who) internal pure returns (bytes32) {

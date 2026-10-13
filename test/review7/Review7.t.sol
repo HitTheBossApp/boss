@@ -589,20 +589,17 @@ abstract contract Review7Base is BossFixture {
         _multi(ra, carol, calls);
         address[4] memory rec = [feeCollector, carol, dave, bob];
         uint256 sum = hook.damage(1, address(ra));
-        // Once the router (the killing swap's locker, not the signer) pays the blow out to a wallet it no
-        // longer counts for the prize (fixed after this review).
-        bool paid = s.paid;
-        uint256 most = paid ? 0 : s.hf;
-        address k1 = _killer(1);
-        uint256 hk = k1 == address(ra) ? (paid ? 0 : s.hf) : 0;
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow,
+        // else to the signer (carol); the router stops counting once it pays the blow out to a wallet.
+        address expected = carol;
+        if (!s.paid && 2 * s.hf > blowBoss) expected = address(ra);
         for (uint256 i = 0; i < 4; i++) {
             sum += hook.damage(1, rec[i]);
             assertLe(hook.damage(1, rec[i]), blowDmg);
-            if (s.held[i] > most) most = s.held[i];
-            if (k1 == rec[i]) hk = s.held[i];
+            if (2 * s.held[i] > blowBoss) expected = rec[i];
         }
         assertEq(sum, blowDmg, "the blow's credit is conserved");
-        assertEq(hk, most, "the prize is with the largest holder of the blow");
+        assertEq(_killer(1), expected, "the prize: a majority holder of the blow, else the signer");
         _assertSums();
         assertAccounting();
     }

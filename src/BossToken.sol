@@ -39,6 +39,7 @@ contract BossToken {
     error TransferToZeroAddress();
     error HookAlreadyBound();
     error NotLaunchOrigin();
+    error NotAHookUnderConstruction();
 
     constructor() {
         totalSupply = TOTAL_SUPPLY;
@@ -48,10 +49,13 @@ contract BossToken {
     }
 
     /// @notice Binds the caller as the hook, once. Called by BossHook's constructor in the launch
-    /// transaction; refused from any other signer and after the first binding.
+    /// transaction; refused from any other signer, after the first binding, and from anything but a
+    /// contract still under construction (no code yet), so a deployed contract the launcher is tricked
+    /// into calling can never bind itself.
     function bindHook() external {
         if (hook != address(0)) revert HookAlreadyBound();
         if (tx.origin != _launchOrigin) revert NotLaunchOrigin();
+        if (msg.sender == tx.origin || msg.sender.code.length != 0) revert NotAHookUnderConstruction();
         hook = msg.sender;
         emit HookBound(msg.sender);
     }

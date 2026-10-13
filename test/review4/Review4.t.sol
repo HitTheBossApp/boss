@@ -427,7 +427,8 @@ abstract contract Review4Base is BossFixture {
         calls[1] = _run(ra, _1(_sellOwn(1, 1)));
         vm.prank(bob, bob);
         ra.multi(calls);
-        assertEq(_killer(1), address(ra));
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: nobody holds the blow any more.
+        assertEq(_killer(1), bob);
         _assertSums();
         assertAccounting();
     }

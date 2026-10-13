@@ -12,7 +12,8 @@ contract RecordingHook {
     uint256 public calls;
     bool public shouldRevert;
 
-    function bind(BossToken token) external {
+    /// @dev Binds in its constructor, as BossHook does: only a contract under construction may bind.
+    constructor(BossToken token) {
         token.bindHook();
     }
 
@@ -29,6 +30,13 @@ contract RecordingHook {
     }
 }
 
+/// @dev A deployed contract the launcher calls later: refused.
+contract LateBinder {
+    function bind(BossToken token) external {
+        token.bindHook();
+    }
+}
+
 contract BossTokenTest is Test {
     BossToken token;
     RecordingHook hookStub;
@@ -37,7 +45,6 @@ contract BossTokenTest is Test {
 
     function setUp() public {
         token = new BossToken();
-        hookStub = new RecordingHook();
     }
 
     function test_supplyMintedToDeployer() public view {
@@ -64,17 +71,17 @@ contract BossTokenTest is Test {
     function test_unboundTokenIsAPlainErc20() public {
         assertEq(token.hook(), address(0));
         token.transfer(alice, 1 ether);
-        assertEq(hookStub.calls(), 0);
+        assertEq(token.balanceOf(alice), 1 ether, "no hook bound: a plain transfer");
     }
 
     function test_bindHook_recordsTheCallerOnce() public {
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
         vm.expectEmit(true, false, false, false, address(token));
-        emit BossToken.HookBound(address(hookStub));
-        hookStub.bind(token);
+        emit BossToken.HookBound(predicted);
+        hookStub = new RecordingHook(token);
         assertEq(token.hook(), address(hookStub));
-        RecordingHook another = new RecordingHook();
         vm.expectRevert(BossToken.HookAlreadyBound.selector);
-        another.bind(token);
+        new RecordingHook(token);
         assertEq(token.hook(), address(hookStub), "the first binding stands");
     }
 
@@ -82,12 +89,24 @@ contract BossTokenTest is Test {
         address stranger = makeAddr("stranger");
         vm.prank(stranger, stranger);
         vm.expectRevert(BossToken.NotLaunchOrigin.selector);
-        hookStub.bind(token);
+        new RecordingHook(token);
+        assertEq(token.hook(), address(0));
+    }
+
+    /// @dev Audit 965a5fce (finding 2): a deployed contract, or the launcher's own EOA, cannot bind.
+    function test_bindHook_onlyAContractUnderConstruction() public {
+        LateBinder late = new LateBinder();
+        vm.expectRevert(BossToken.NotAHookUnderConstruction.selector);
+        late.bind(token);
+        address launcher = tx.origin; // the signer that deployed the token
+        vm.prank(launcher, launcher);
+        vm.expectRevert(BossToken.NotAHookUnderConstruction.selector);
+        token.bindHook();
         assertEq(token.hook(), address(0));
     }
 
     function test_transferNotifiesTheHook() public {
-        hookStub.bind(token);
+        hookStub = new RecordingHook(token);
         token.transfer(alice, 5 ether);
         assertEq(hookStub.calls(), 1);
         assertEq(hookStub.lastFrom(), address(this));
@@ -97,7 +116,7 @@ contract BossTokenTest is Test {
     }
 
     function test_transferFromNotifiesTheHook() public {
-        hookStub.bind(token);
+        hookStub = new RecordingHook(token);
         token.approve(bob, 3 ether);
         vm.prank(bob);
         token.transferFrom(address(this), alice, 3 ether);
@@ -108,7 +127,7 @@ contract BossTokenTest is Test {
     }
 
     function test_transferRevertsIfTheHookReverts() public {
-        hookStub.bind(token);
+        hookStub = new RecordingHook(token);
         hookStub.setRevert(true);
         vm.expectRevert("hook says no");
         token.transfer(alice, 1 ether);

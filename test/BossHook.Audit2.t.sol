@@ -144,7 +144,8 @@ contract BossAudit2Test is ReviewBase {
         assertEq(hook.hp(), hook.maxHp(), "the heal put the boss back to full");
         assertEq(hook.damage(1, bob), 0, "no net damage, no credit");
         assertEq(hook.eligibleDamage(1), 0, "nothing eligible");
-        assertGt(hook.bought(1, bob), 0, "bob still holds the BOSS he kept");
+        // Since audit 965a5fce (finding 3) BOSS whose credit the cap cut carries no forfeit weight.
+        assertEq(hook.bought(1, bob), 0, "the BOSS whose credit was cut is not counted");
         assertAccounting();
     }
 
@@ -225,8 +226,9 @@ contract BossAudit2Test is ReviewBase {
         _runBundle(t, c);
 
         (address killer, uint256 prize) = _killer(1);
-        assertEq(killer, carol, "the wallet that received the blow keeps it");
-        assertEq(hook.unclaimedKill(carol), prize);
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: carol holds 40%, the rest stayed inside the PoolManager.
+        assertEq(killer, bundlerEOA, "no majority: the signer keeps it");
+        assertEq(hook.unclaimedKill(bundlerEOA), prize);
         assertEq(hook.unclaimedKill(bundlerWallet), 0, "another party's BOSS is not the blow's");
         assertEq(hook.damage(1, bundlerWallet), 0, "no killing credit for another party");
         assertAccounting();
@@ -273,8 +275,9 @@ contract BossAudit2Test is ReviewBase {
 
         (address killer, uint256 prize) = _killer(1);
         assertEq(boss.balanceOf(address(script)), 0, "the custodian kept nothing");
-        assertEq(killer, alice, "alice holds all that is left of the blow");
-        assertEq(hook.unclaimedKill(alice), prize);
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: alice holds 40%, 60% went back to the pool.
+        assertEq(killer, carol, "no majority: the signer keeps it");
+        assertEq(hook.unclaimedKill(carol), prize);
         assertEq(hook.unclaimedKill(address(script)), 0);
     }
 
@@ -287,8 +290,9 @@ contract BossAudit2Test is ReviewBase {
         script.runMany(s);
 
         (address killer, uint256 prize) = _killer(1);
-        assertEq(killer, alice, "alice holds all that is left of the blow");
-        assertEq(hook.unclaimedKill(alice), prize);
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: alice holds 40%, 60% went back to the pool.
+        assertEq(killer, carol, "no majority: the signer keeps it");
+        assertEq(hook.unclaimedKill(carol), prize);
         assertEq(hook.unclaimedKill(address(script)), 0);
     }
 
@@ -305,8 +309,9 @@ contract BossAudit2Test is ReviewBase {
 
         (address killer, uint256 prize) = _killer(1);
         assertGt(boss.balanceOf(alice), boss.balanceOf(bob), "46% > 44%");
-        assertEq(killer, alice, "the largest holder of the blow wins");
-        assertEq(hook.unclaimedKill(alice), prize);
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: 46% / 10% / 44%.
+        assertEq(killer, carol, "no majority: the signer keeps it");
+        assertEq(hook.unclaimedKill(carol), prize);
         assertEq(hook.unclaimedKill(bob), 0);
     }
 }

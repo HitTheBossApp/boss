@@ -147,3 +147,31 @@ wallet that is its own router hands the prize to the first wallet it pays blow B
   3,000 runs; invariants at 256 runs × depth 64; mainnet fork 5 passed.
 - `forge build --sizes`: BossHook runtime 24,219 bytes (limit 24,576; margin 357).
 - Gas with an active ability, router included: buy 262,990, sell 245,585; transfer 45,980 / 51,623.
+
+## Fifth swarm audit (job 965a5fce, 2026-10-13)
+
+The swarm audit of `5acf4b4` found 0 high, 1 medium, 2 low and 2 info.
+
+- Medium 1, a fee-then-exact-delivery router holding planted BOSS handed the prize to the fee wallet. It was
+  the third finding about who gets the prize when a contract splits the blow, so the rule was replaced, as
+  the judge suggested: the prize goes to the wallet holding more than half of the blow's BOSS, else it stays
+  with the signer. The holder list and `_recount` were removed; the killing swap's router still stops
+  counting once it pays blow BOSS out to a wallet.
+- Low 2: `bindHook` only accepts a contract under construction (not an EOA, not a deployed contract).
+  Independent review 8 showed a phished call can still create a child that binds from its constructor, so
+  the one-transaction launch (the IMD factory) remains a launch assumption.
+- Low 3: when the per-transaction cap cuts pending credit, it cuts the BOSS that carries it too, so it does
+  not pad `bought`.
+- Infos 4 (a trade scaled to zero by a sub-1x ability) and 5 (last-hit front-running; use a private relay)
+  are documented.
+
+Independent review 8 (`test/review8/`, BOSS as currency0, currency1 and native ETH) found that the cap made
+the killing blow smaller so a first direct fee took all of it (fixed: the blow keeps all its BOSS), that a
+second kill in one transaction left the first prize on its router (fixed: it goes to the signer), and that
+the README overstated who can never take the prize (corrected: routes that split the blow can hand it to a
+third party).
+
+- `forge test`: 51 suites, 609 tests passed, 0 failed, 5 skipped (fork tests, need an RPC). 44 fuzz tests at
+  3,000 runs; invariants at 256 runs × depth 64; mainnet fork 5 passed.
+- `forge build --sizes`: BossHook runtime 24,008 bytes (limit 24,576; margin 568); BossToken 1,882.
+- Gas with an active ability, router included: buy 263,112, sell 245,581; transfer 45,980 / 51,623.

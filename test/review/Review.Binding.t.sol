@@ -89,27 +89,24 @@ contract ReviewBindingTest is BossFixture {
         assertEq(token.hook(), address(0));
     }
 
-    /// @dev The launch window risk: if the launcher's EOA signs any transaction that reaches `bindHook`
-    /// between the token deploy and the hook deploy (a phished call), the token is bound to that contract,
-    /// the real hook deploy reverts (loudly) and the bound contract can block every transfer of the token.
-    function test_probeE3_launcherPhishedBetweenDeploys_tokenBoundToEvilHook_realHookReverts() public {
+    /// @dev The launch window risk, closed by audit 965a5fce (finding 2): if the launcher's EOA is tricked
+    /// into a call that reaches `bindHook` between the token deploy and the hook deploy, the deployed
+    /// contract cannot bind (only a contract under construction can), and the real hook still binds.
+    function test_probeE3_launcherPhishedBetweenDeploys_cannotBind_realHookStillBinds() public {
         TokenFactory factory = new TokenFactory();
         vm.prank(launcher, launcher);
         BossToken token = factory.deploy();
         EvilHook evil = new EvilHook();
         vm.prank(launcher, launcher);
+        vm.expectRevert(BossToken.NotAHookUnderConstruction.selector);
         evil.bind(token); // the launcher is tricked into one call
-        assertEq(token.hook(), address(evil));
+        assertEq(token.hook(), address(0));
 
         (bytes memory initCode, bytes32 salt) = _hookInit(address(token));
         vm.prank(launcher, launcher);
         address real = deployer.deploy(initCode, salt);
-        assertEq(real, address(0), "the real hook cannot bind any more: loud failure");
-
-        evil.setBlock(true);
-        vm.prank(launcher);
-        vm.expectRevert("blocked");
-        token.transfer(alice, 1 ether);
+        assertTrue(real != address(0), "the real hook binds");
+        assertEq(token.hook(), real);
     }
 
     /// @dev Hook bound, pool not initialized (round 0): every transfer shape goes through and records nothing.

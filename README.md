@@ -63,8 +63,10 @@ whose token sorted above its pair; any other price reverts (`WrongStartingPrice`
 - No owner, no setters, no proxy, no `DELEGATECALL`, no `SELFDESTRUCT`. Hook flags are `0x20CC`.
 - `BossToken` is a fixed-supply ERC-20 (1,000,000,000, minted once to the deployer) with one addition: after
   every transfer it calls `BossHook.onBossTransfer`. The hook is bound once, by the hook's constructor in the
-  launch (`bindHook`, refused after the first binding and from any signer but the token's deployer; a launch
-  that cannot bind reverts instead of running unscored). The handler is bookkeeping only, with no revert
+  launch (`bindHook`, refused after the first binding, from any signer but the token's deployer, and from
+  anything but a contract still under construction, so a deployed contract the deployer is tricked into
+  calling cannot bind itself, although a contract it creates during that call still could; a launch that
+  cannot bind reverts instead of running unscored). The handler is bookkeeping only, with no revert
   path, so it cannot block a transfer. No owner, mint, pause, blocklist, fee or upgrade path.
 - **The keeper** collects the 1% treasury and **selects which swarm-written ability is proposed** on the
   separate `AbilityBoard`. That is real influence over the game, bounded as follows.
@@ -134,33 +136,39 @@ The suite includes fuzz and invariant tests (money accounting, HP bounds, closed
 - A closed round's credit is frozen, as in any later transaction, except the killing blow's (audit
   `853ff4df`, finding 1). The killing blow and its damage are credited to the signer at the kill and
   travel with that BOSS for the rest of the transaction, through any router, aggregator or solver that
-  custodies it on the way; the killer prize goes to whoever holds the largest share of the BOSS that left
-  the pool with the killing blow, re-decided whenever the largest holder hands some away (blow BOSS handed
-  back to the pool or sent to the hook is held by nobody). Other BOSS moving in that transaction carries
-  neither closed-round credit nor the prize. Which BOSS leaves a wallet cannot be seen, so three rules
-  apply. The router that executed the killing swap holds the blow in custody and pays it out in proportion
-  to its balance: an interface fee taken as a share of that balance carries only that share of the blow,
-  even with BOSS planted on the router (audit `94b6c9a5`, finding 1). Once it pays blow BOSS out to a
-  wallet it no longer counts for the prize (unless it is the signer), so BOSS planted on it never keeps the
-  prize there (independent review 7). What it keeps of the blow's credit stays with it: a router that sends
-  an exact amount while holding other BOSS (its own, or planted by anyone) keeps the blow's credit share of
-  that BOSS, and if anyone may sweep the router, a planter can take that share (never the prize). A router
-  that delivers a quoted amount and sweeps the surplus, planted BOSS included, to its own wallet can hand
-  that wallet the larger share and the prize. A smart wallet that is its own router (not the signer) hands
-  the prize to the first wallet it pays blow BOSS to. Any other contract (a forwarder) hands the blow on first,
-  so BOSS anyone planted on it never holds the blow back (independent review 5). A wallet without code
-  spends its older BOSS first, so sending older BOSS in the same transaction never gives the blow away
-  (audit `853ff4df`, finding 2). A smart account or an EIP-7702 wallet that kills through a router and then
-  pays with older BOSS in the same transaction therefore hands the blow on with that payment: after a small
-  last hit, a fee in older BOSS at least as large as the blow hands on its whole credit and the whole
-  killer prize. A contract that trades from its constructor has no code yet and counts as a wallet, so BOSS
-  planted on its address beforehand keeps the blow on it (independent review 6; griefing only, the planter
-  gains nothing). BOSS the signer's
-  router takes out of the pool later in that transaction is counted as the killing blow's first. What
-  never leaves the pool in that transaction (claims, a flash round trip), or is still inside when another
-  router swaps, stays with the signer (unless another party takes BOSS out first, see above); a router
-  that delivers the BOSS in a later transaction keeps the kill; and of two kills in one transaction only
-  the last one travels.
+  custodies it on the way. Other BOSS moving in that transaction carries no closed-round credit.
+- The killer prize goes to the wallet that holds more than half of the BOSS that left the pool with the
+  killing blow; while no wallet does, it stays with the signer of the killing transaction (audit
+  `965a5fce`, finding 1). Through the standard routes (the Uniswap app and the Universal Router, the IMD
+  explorer) the player who receives the swap's output holds nearly all of it, so an interface fee, a solver
+  keeping a wei, a custodian that sells part of the blow back or another player's transfer bundled after
+  the kill do not take the prize from them. If a route leaves nobody with most of the blow (an exact
+  delivery from a router holding planted BOSS, a router that keeps part of it inside the PoolManager), the
+  prize stays with the signer: for a relayed or bundled transaction, the relayer or bundler. The router that
+  executed the killing swap stops counting once it pays blow BOSS out to a wallet (unless it is the signer),
+  but what it still holds keeps travelling with its later payouts. Routes that split the blow can hand the
+  prize to a third party (independent review 8): a router that delivers a quoted amount and sweeps the
+  surplus, planted BOSS included, to its own wallet; a fee taker that is not the router that swapped and
+  takes its fee first, as a share of a balance someone inflated with planted BOSS; or a router anyone may
+  sweep, swept later in the same transaction by whoever planted BOSS on it. A previous kill in the same
+  transaction stops travelling at the next kill: a prize still on the router that executed it, or on no
+  majority holder, goes to the signer.
+- Which BOSS leaves a wallet cannot be seen, so the blow's credit follows three rules. The router that
+  executed the killing swap pays it out in proportion to its balance: an interface fee taken as a share of
+  that balance carries only that share (audit `94b6c9a5`, finding 1), and a router that sends an exact
+  amount while holding other BOSS (its own, or planted by anyone) keeps the blow's credit share of that
+  BOSS; if anyone may sweep the router, a planter can take that share of the credit (never the prize). Any
+  other contract (a forwarder) hands the blow on first, so BOSS planted on it never holds the blow back
+  (independent review 5). A wallet without code spends its older BOSS first, so sending older BOSS in the
+  same transaction never gives the blow away (audit `853ff4df`, finding 2); a smart account or an
+  EIP-7702 wallet that kills through a router and then pays with older BOSS in the same transaction hands
+  the blow's credit on with that payment, and the prize if that payment carries more than half of the blow
+  (independent review 8). A contract that trades from its constructor has no code yet and
+  counts as a wallet (independent review 6). BOSS the signer's router takes out of the pool later in that
+  transaction is counted as the killing blow's first. What never leaves the pool in that transaction
+  (claims, a flash round trip), or is still inside when another router swaps, stays with the signer
+  (unless another party takes BOSS out first, see above); a router that delivers the BOSS in a later
+  transaction keeps the kill's credit; and of two kills in one transaction only the last one travels.
 - A buy and a sell of BOSS in one unlock settled gross (the sell's BOSS paid into the pool from your
   wallet while the buy's BOSS is taken out in full) charges the sold BOSS twice: the sell takes back that
   much of the buy's pending credit and your wallet forfeits its own credit for the BOSS it paid in (audit
@@ -192,17 +200,19 @@ The suite includes fuzz and invariant tests (money accounting, HP bounds, closed
   `be67d693`, finding 4).
 - BOSS sent to the hook, or taken out of the pool to it, is lost for good (the hook cannot move BOSS), and
   its credit is forfeited like BOSS handed back to the pool.
-- A trade under 40 wei of IMD pays no hook fee (rounding) but still hits or heals; that is far below gas cost.
-- Each time the holder of the most of the killing blow's BOSS hands some away, the prize is re-decided over
-  every wallet that received some in that transaction (about 350 gas per wallet). Splitting the blow among
-  hundreds of wallets in one transaction can exceed a block; only whoever holds it can do that.
+- A trade under 40 wei of IMD pays no hook fee (rounding); its hit or heal is scaled by the ability and is
+  dropped when that rounds to zero (a trade of a few wei under a sub-1x ability). Both are far below gas cost.
 - `BossToken` makes one external call per transfer (`onBossTransfer`); it has no revert path, so it cannot
   block transfers, but token scanners may flag the pattern.
-- The hook binds the token in its constructor; the token accepts a binding once, and only in a transaction
-  signed by its deployer. The launch must deploy both in one transaction, as the IMD factory does: in
-  between, any contract that key called could bind itself, and the real hook would then revert, loudly,
-  rather than launch unscored.
-- Bots race for the killing blow.
+- The hook binds the token in its constructor; the token accepts a binding once, only in a transaction
+  signed by its deployer, and only from a contract under construction (audit `965a5fce`, finding 2). A
+  contract the deployer is tricked into calling between the two deploys could still create a child that
+  binds from its constructor (independent review 8), so the launch deploys both in one transaction, as the
+  IMD factory does, and the deployer signs nothing else in between.
+- Bots race for the killing blow. The killer prize goes to whoever lands the last hit, however small: the
+  HP left is public and a pending finishing buy is visible, so a searcher can front-run it with a buy of the
+  HP left plus dust, and the victim's buy then lands on the fresh boss. Damage already dealt still earns its
+  share of the damage pool. Send finishing buys through a private relay (audit `965a5fce`, finding 5).
 - After a high-volume round the next boss holds a large seed, and one wallet can take most of it by
   killing the fresh boss alone. The HP scaling (a boss that fell fast comes back 1.5x tougher) dampens this.
 - Unclaimed prizes and rounding dust stay in the hook forever: there is no admin sweep.

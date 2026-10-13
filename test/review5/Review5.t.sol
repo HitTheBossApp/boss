@@ -508,7 +508,8 @@ abstract contract Review5Base is BossFixture {
         assertApproxEqAbs(hook.damage(1, alice), blowDmg / 4, 2);
         assertApproxEqAbs(hook.damage(1, dave), blowDmg / 2, 2);
         assertApproxEqAbs(hook.damage(1, carol), blowDmg - blowDmg / 4 - blowDmg / 2, 3);
-        assertEq(_killer(1), dave, "the largest holder of the blow takes the prize");
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: dave holds exactly half, not more.
+        assertEq(_killer(1), bob, "no majority: the signer keeps the prize");
         _assertSums();
         assertAccounting();
     }
@@ -524,7 +525,9 @@ abstract contract Review5Base is BossFixture {
         assertApproxEqAbs(hook.damage(1, dave), blowDmg * older / (older + blowBoss), 2, "the payment's share");
         // Documented limit (README): a smart wallet that is its own router (not the signer) stops counting for
         // the prize once it pays blow BOSS out, so its payee takes the prize (review 7's fix of planted BOSS).
-        assertEq(_killer(1), dave, "documented: the paying router-wallet hands on the prize");
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer; the paying router-wallet no longer counts.
+        uint256 daveHeld = blowBoss * older / (older + blowBoss);
+        assertEq(_killer(1), 2 * daveHeld > blowBoss ? dave : bob, "majority, else the signer");
         _assertSums();
         assertAccounting();
     }
@@ -600,7 +603,8 @@ abstract contract Review5Base is BossFixture {
         calls[1] = abi.encodeCall(R5Router.toHook, (address(hook), 1000 ether));
         calls[2] = _run(_1(_sellOwn(1, 2)));
         _multi(ra, bob, calls);
-        assertEq(_killer(1), address(ra));
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: half of the blow went back to the pool.
+        assertEq(_killer(1), bob);
         _assertSums();
         assertAccounting();
     }

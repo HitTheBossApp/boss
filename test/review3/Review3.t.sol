@@ -486,7 +486,8 @@ abstract contract Review3Base is BossFixture {
                 (_2(_A(R3Router.Kind.SellOut, address(0), 0.01 ether), _A(R3Router.Kind.BuyIn, address(0), 0.5 ether)))
             )
         );
-        assertEq(_killer(1), carol);
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: carol holds 40%, the rest stayed inside.
+        assertEq(_killer(1), bundlerEOA);
         _assertSums();
         assertAccounting();
     }

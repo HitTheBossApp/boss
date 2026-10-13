@@ -119,7 +119,8 @@ abstract contract Review2Base is ReviewBase {
         // trade to could.
         assertEq(hook.damage(1, carol), INITIAL_HP, "LIMIT: the executor's wallet took the blow's damage");
         assertEq(hook.damage(1, alice), 0, "LIMIT: the signer got her BOSS without the blow's credit");
-        assertEq(_killer(1), carol, "LIMIT: and the prize");
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: carol hands all of it back to the pool, so the prize returns to the signer.
+        assertEq(_killer(1), alice, "FIXED: the prize returns to the signer");
     }
 
     // =================================================================== P3. the executor collects the prize between unlocks
@@ -297,7 +298,8 @@ abstract contract Review2Base is ReviewBase {
         assertEq(hook.bought(1, bob) + 1 >= hook.bought(1, carol), true);
         // Since audit 94b6c9a5 (review 7) the router stops counting for the prize once it pays out, so the
         // first half's receiver takes it, and an equal second half does not take it away (ties stay put).
-        assertEq(_killer(1), bob, "the first of two equal halves keeps the prize");
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: two equal halves are not a majority.
+        assertEq(_killer(1), alice, "no majority: the signer keeps the prize");
         assertEq(hook.unclaimedKill(address(script)), 0, "the router keeps nothing");
         assertApproxEqAbs(hook.damage(1, bob), 0.5 ether, 2);
         assertApproxEqAbs(hook.damage(1, carol), 0.5 ether, 2);
@@ -335,11 +337,8 @@ abstract contract Review2Base is ReviewBase {
         a[2] = script.forward(address(hook), type(uint256).max);
         vm.prank(alice, alice);
         script.run(a);
-        assertEq(
-            _killer(1),
-            address(script),
-            "FIXED: the hook never becomes the killer; the prize stays with the last holder"
-        );
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer.
+        assertEq(_killer(1), alice, "FIXED: the hook never becomes the killer; the signer keeps the prize");
         vm.expectRevert(abi.encodeWithSignature("NothingToClaim()"));
         hook.claimKill(address(hook));
         assertEq(quoteToken.balanceOf(address(hook)), 0, "no raw IMD can be stranded in the hook this way");

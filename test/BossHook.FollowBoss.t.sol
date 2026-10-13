@@ -510,7 +510,8 @@ abstract contract BossFollowBossBase is BossFixture {
         vm.prank(alice, alice);
         script.run(a);
         (address killer,,,,) = hook.results(1);
-        assertEq(killer, address(script), "the hook never becomes the killer");
+        // Since audit 965a5fce (finding 1) the prize goes to a wallet holding more than half of the blow, else to the signer: nobody holds the blow, so the signer.
+        assertEq(killer, alice, "the hook never becomes the killer: the signer keeps it");
         assertEq(hook.unclaimedKill(address(hook)), 0);
     }
 
